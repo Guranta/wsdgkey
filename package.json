@@ -7,7 +7,7 @@
     "build": "next build",
     "start": "next start -H 0.0.0.0 -p 47821",
     "lint": "eslint",
-    "test": "node scripts/check-i18n.mjs && node --import ./lib/test-register.mjs --experimental-strip-types --test lib/url.test.mts lib/redact.test.mts lib/usage.test.mts lib/forwarded.test.mts lib/auth-store.test.mts lib/billing-math.test.mts lib/channel-payload.test.mts lib/locale.test.mts lib/gateway-public.test.mts lib/recon-store.test.mts lib/channel-list.test.mts lib/rebind.test.mts lib/adopt-legacy-db.test.mts lib/sessions.test.mts lib/login-guard.test.mts"
+    "test": "node scripts/check-i18n.mjs && node --import ./lib/test-register.mjs --experimental-strip-types --test lib/url.test.mts lib/redact.test.mts lib/usage.test.mts lib/forwarded.test.mts lib/auth-store.test.mts lib/billing-math.test.mts lib/channel-payload.test.mts lib/locale.test.mts lib/gateway-public.test.mts lib/recon-store.test.mts lib/channel-list.test.mts lib/channel-claim.test.mts lib/rebind.test.mts lib/adopt-legacy-db.test.mts lib/sessions.test.mts lib/login-guard.test.mts"
   },
   "dependencies": {
     "bcryptjs": "^3.0.3",

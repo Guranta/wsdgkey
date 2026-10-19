@@ -31,7 +31,7 @@ import {
   type UpstreamChannel,
 } from "./upstream";
 
-const PAGE_SIZE = 20;
+const PAGE_SIZE = 50;
 
 type ChannelRow = Record<string, unknown>;
 
@@ -517,7 +517,7 @@ async function rememberChannel(gatewayId: string, item: UpstreamChannel, creator
       last_sync_at, sync_status, consecutive_failures, next_poll_at, demo_fail_left,
       priority, weight, tag, other, status_code_mapping, param_override, header_override, setting, settings,
       openai_organization, response_time, auto_disable_reason, auto_disable_history, auto_disabled_at, key_fingerprints
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ok', 0, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ok', 0, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       id, gatewayId, item.id, creatorId, item.name, item.type, item.group || "default", item.status, item.baseUrl, item.models,
       item.modelMapping, item.testModel, item.remark, item.autoBan ? 1 : 0, item.balance, item.usedQuota, item.todayFromPayload,

@@ -75,7 +75,7 @@ test("thousands of channels still return one sorted page", async () => {
   const listed = await queryChannels(admin, new URLSearchParams({ gateway: "gw", sort: "total", dir: "asc", page: "1" }));
   const listedMs = performance.now() - listedAt;
   assert.equal(listed.total, total);
-  assert.equal(listed.items.length, 20);
+  assert.equal(listed.items.length, 50);
   assert.equal(listed.items[0]?.upstreamId, 1);
   assert.equal(listed.items[0]?.usedQuota, 1);
   assert.equal(listed.stats.total, total);
@@ -98,7 +98,7 @@ test("thousands of channels still return one sorted page", async () => {
   const searched = await queryChannels(admin, new URLSearchParams({ gateway: "gw", keyword: needle }));
   const searchedMs = performance.now() - searchedAt;
   assert.equal(searched.total, 800);
-  assert.equal(searched.items.length, 20);
+  assert.equal(searched.items.length, 50);
   assert.equal(searched.recognized, 800);
   assert.equal(searched.truncated, false);
   assert.ok(searchedMs < 1500, `id search took ${searchedMs.toFixed(0)}ms`);

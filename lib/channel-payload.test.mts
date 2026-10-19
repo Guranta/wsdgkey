@@ -7,6 +7,7 @@ import {
   VOLCENGINE_ENDPOINTS,
   VOLCENGINE_UNLOCK_CLICKS,
   keyLineWarnings,
+  splitKeys,
   transformFormDataToCreatePayload,
   transformFormDataToUpdatePayload,
   validateChannelForm,
@@ -92,6 +93,20 @@ test("key shape warnings do not block save; structure still does", () => {
   assert.equal(validateChannelForm(vertex, false), "vertexJson");
   const vertexOk = form({ name: "vx", type: 41, models: "gemini", key: '{"client_email":"a@b.c"}', other: "us-central1" });
   assert.equal(validateChannelForm(vertexOk, false), null);
+});
+
+test("a whole JSON key stays one key even when pretty-printed", () => {
+  const pretty = '{\n  "type": "service_account",\n  "project_id": "p",\n  "private_key": "-----BEGIN PRIVATE KEY-----"\n}';
+  assert.deepEqual(splitKeys(pretty), [pretty.trim()]);
+  const array = '[{"client_email":"a@b.c"},{"client_email":"d@e.f"}]';
+  assert.deepEqual(splitKeys(array), [array]);
+  // 多行 sk- 密钥仍按行走
+  assert.deepEqual(splitKeys("sk-1\nsk-2\n\nsk-3"), ["sk-1", "sk-2", "sk-3"]);
+  // 不合法的多行 JSON 不吞错，交给逐行/结构校验
+  assert.equal(splitKeys("{\nbroken")[0], "{");
+  // 校验走整份 JSON，不因换行被拆
+  const prettyForm = form({ name: "vx", type: 41, models: "gemini", key: pretty, other: "us-central1" });
+  assert.equal(validateChannelForm(prettyForm, false), null);
 });
 
 test("test consume is removed from today's log stat before the baseline", () => {

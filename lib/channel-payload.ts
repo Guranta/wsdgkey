@@ -180,6 +180,16 @@ export function parseGroups(groups: string): string[] {
 }
 
 export function splitKeys(value: string): string[] {
+  const trimmed = value.trim();
+  // Vertex AI / Codex 的整份 JSON 密钥（可能多行、也可能是服务账号数组）：不按行拆
+  if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+    try {
+      JSON.parse(trimmed);
+      return [trimmed];
+    } catch {
+      /* 不是合法 JSON 就按行走，后面的逐行校验会报具体错误 */
+    }
+  }
   return value.split("\n").map((item) => item.trim()).filter(Boolean);
 }
 
