@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-labelledby="km-title">
+  <title id="km-title">万事大吉</title>
+  <style>
+    .km-eyes { transform-box: fill-box; transform-origin: center; animation: km-blink 7s ease-in-out infinite; }
+    @keyframes km-blink { 0%, 94%, 100% { transform: scaleY(1); } 96% { transform: scaleY(0.1); } }
+    @media (prefers-reduced-motion: reduce) { .km-eyes { animation: none; } }
+  </style>
+  <path fill="#0A0A0A" d="M33 5C49 5 59.5 15.5 59.5 31.5C59.5 48 48.5 59.5 31.5 59.5C15.5 59.5 4.5 49 4.5 32.5C4.5 15.5 17 5 33 5Z"/>
+  <ellipse fill="#30B0C7" cx="46.5" cy="15.5" rx="4.2" ry="2.4" transform="rotate(35 46.5 15.5)"/>
+  <g class="km-eyes" fill="#FFFFFF">
+    <ellipse cx="24.5" cy="32" rx="5" ry="8.2"/>
+    <ellipse cx="40.5" cy="32" rx="5" ry="8.2"/>
+  </g>
+</svg>

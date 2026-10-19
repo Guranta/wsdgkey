@@ -1,0 +1,12 @@
+node_modules
+.next
+.git
+data
+coverage
+npm-debug.log
+.DS_Store
+*.md
+.env*
+!.env.example
+tmp-scaffold
+terminals

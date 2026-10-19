@@ -1,0 +1,166 @@
+@import "tailwindcss";
+
+/* Light only. There is no dark theme. */
+:root {
+  color-scheme: light;
+  --bg-page: #f8f8f8;
+  --bg: #ffffff;
+  --sidebar: #ffffff;
+  --background: #ffffff;
+  --canvas: var(--bg-page);
+  --foreground: #0a0a0a;
+  --secondary: #525252;
+  --muted: #8a8a8a;
+  --card: #ffffff;
+  --border: #e8e8e8;
+  --input: #f3f3f3;
+  --hover: #f3f3f3;
+  --primary: #0a0a0a;
+  --primary-hover: #2a2a2a;
+  --primary-foreground: #ffffff;
+  --primary-soft: #f3f3f3;
+  --green: #34c759;
+  --pink: #ff2d55;
+  --brown: #a2845e;
+  --red: #ff3b30;
+  --cyan: #30b0c7;
+  --teal: #30b0c7;
+  --orange: #ff9500;
+  --blue: #007aff;
+  --purple: #af52de;
+  --yellow: #ffcc00;
+  --chart-other: #c7c7cc;
+  --chart-track: #f0f0f0;
+  --ok: #16a34a;
+  --ok-soft: #dcfce7;
+  --warn: #d97706;
+  --warn-soft: #fef3c7;
+  --danger: #dc2626;
+  --danger-soft: #fee2e2;
+  --bubble: color-mix(in srgb, var(--blue) 14%, white);
+  --accent-foreground: #0a0a0a;
+  --shadow-card: 0 4px 24px rgba(0, 0, 0, 0.06);
+}
+
+@theme inline {
+  --color-bg: var(--bg);
+  --color-sidebar: var(--sidebar);
+  --color-background: var(--background);
+  --color-canvas: var(--canvas);
+  --color-foreground: var(--foreground);
+  --color-secondary: var(--secondary);
+  --color-muted: var(--muted);
+  --color-card: var(--card);
+  --color-line: var(--border);
+  --color-input: var(--input);
+  --color-hover: var(--hover);
+  --color-primary: var(--primary);
+  --color-primary-hover: var(--primary-hover);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary-soft: var(--primary-soft);
+  --color-danger: var(--danger);
+  --color-danger-soft: var(--danger-soft);
+  --color-warn: var(--warn);
+  --color-warn-soft: var(--warn-soft);
+  --color-ok: var(--ok);
+  --color-ok-soft: var(--ok-soft);
+  --color-green: var(--green);
+  --color-pink: var(--pink);
+  --color-brown: var(--brown);
+  --color-red: var(--red);
+  --color-cyan: var(--cyan);
+  --color-teal: var(--teal);
+  --color-orange: var(--orange);
+  --color-blue: var(--blue);
+  --color-purple: var(--purple);
+  --color-bubble: var(--bubble);
+  --color-accent-foreground: var(--accent-foreground);
+  --radius-control: 12px;
+  --radius-card-sm: 10px;
+  --radius-card: 16px;
+  --radius-card-lg: 16px;
+  --spacing-sidebar: 240px;
+  --spacing-sidebar-collapsed: 72px;
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+body {
+  background: var(--bg-page);
+  color: var(--foreground);
+  font-family: "SF Pro Text", "PingFang SC", "Hiragino Sans GB", "Noto Sans SC", "Microsoft YaHei", ui-sans-serif, system-ui, sans-serif;
+}
+
+/* Unlayered rules beat Tailwind utilities, which made buttons ignore text size and weight. */
+@layer base {
+  button,
+  a,
+  input,
+  select,
+  textarea {
+    font: inherit;
+  }
+}
+
+::selection {
+  background: color-mix(in srgb, var(--foreground) 16%, white);
+  color: var(--foreground);
+}
+
+.brand-cjk {
+  font-family: "PingFang SC", "HarmonyOS Sans SC", "Source Han Sans SC", "Noto Sans SC", "Microsoft YaHei", sans-serif;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+.km-mark .km-eyes {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: km-blink 7s ease-in-out infinite;
+}
+
+@keyframes km-blink {
+  0%, 94%, 100% { transform: scaleY(1); }
+  96% { transform: scaleY(0.1); }
+}
+
+.login-face { display: flex; justify-content: center; margin: 4px 0 6px; }
+.lf-svg { display: block; overflow: visible; }
+.lf-body { transform-box: view-box; transform-origin: 32px 60px; animation: lf-float 4s ease-in-out infinite; }
+.lf-look { transition: transform 0.18s ease-out; }
+.lf-open { transform-box: fill-box; transform-origin: center; transition: transform 0.09s ease-in; }
+.lf-shut, .lf-happy { opacity: 0; transition: opacity 0.12s; }
+.login-face.blink .lf-open { transform: scaleY(0.08); }
+.login-face.pw .lf-open, .login-face.happy .lf-open { opacity: 0; }
+.login-face.pw .lf-shut { opacity: 1; }
+.login-face.happy .lf-happy { opacity: 1; }
+.login-face.shake .lf-svg { animation: lf-shake 0.5s ease-in-out; }
+.login-face.hop .lf-svg { animation: lf-hop 0.45s cubic-bezier(0.3, 1.6, 0.5, 1); }
+
+@keyframes lf-float {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-1.35px); }
+}
+
+@keyframes lf-shake {
+  0%, 100% { transform: translateX(0) rotate(0); }
+  20% { transform: translateX(-7px) rotate(-4deg); }
+  45% { transform: translateX(7px) rotate(4deg); }
+  70% { transform: translateX(-4px) rotate(-2deg); }
+  88% { transform: translateX(2px); }
+}
+
+@keyframes lf-hop {
+  0%, 100% { transform: translateY(0) scale(1); }
+  15% { transform: translateY(0) scale(1.04, 0.94); }
+  50% { transform: translateY(-12px) scale(0.98, 1.03); }
+  80% { transform: translateY(0) scale(1.03, 0.97); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .km-mark .km-eyes,
+  .lf-body,
+  .login-face.shake .lf-svg,
+  .login-face.hop .lf-svg { animation: none; }
+  .lf-look, .lf-open, .lf-shut, .lf-happy { transition: none; }
+}

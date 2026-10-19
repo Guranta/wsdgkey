@@ -1,0 +1,19 @@
+services:
+  newapi-login:
+    build: .
+    ports:
+      - "127.0.0.1:3000:3000"
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      NODE_ENV: production
+      PORT: "3000"
+      # Bind inside the container. Docker publishes only 127.0.0.1:3000 on the host.
+      HOSTNAME: "0.0.0.0"
+      DATABASE_URL: file:/data/app.db
+    volumes:
+      - newapi-data:/data
+
+volumes:
+  newapi-data:
