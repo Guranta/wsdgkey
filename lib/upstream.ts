@@ -255,6 +255,31 @@ export async function fetchUpstreamChannel(gateway: GatewaySecret, upstreamId: n
   return parseChannel(body.data);
 }
 
+/** rc.45 GET /api/group/ 返回站点可选分组名数组。 */
+export async function fetchGatewayGroups(gateway: GatewaySecret): Promise<string[]> {
+  const body = await callGateway<{ data?: unknown }>(gateway, "list", "/api/group/");
+  if (!Array.isArray(body.data)) return [];
+  return body.data.map((item) => String(item)).filter(Boolean);
+}
+
+export type GatewayPricingModel = { name: string; groups: string[] };
+
+/** 站点模型清单来自 GET /api/pricing；enable_groups 是该模型可用的分组。 */
+export async function fetchGatewayModels(gateway: GatewaySecret): Promise<GatewayPricingModel[]> {
+  const body = await callGateway<{ data?: unknown }>(gateway, "list", "/api/pricing");
+  if (!Array.isArray(body.data)) return [];
+  const models: GatewayPricingModel[] = [];
+  for (const entry of body.data) {
+    if (!entry || typeof entry !== "object") continue;
+    const row = entry as Record<string, unknown>;
+    const name = typeof row.model_name === "string" ? row.model_name.trim() : "";
+    if (!name) continue;
+    const groups = Array.isArray(row.enable_groups) ? row.enable_groups.map((item) => String(item)).filter(Boolean) : [];
+    models.push({ name, groups });
+  }
+  return models;
+}
+
 export async function addUpstreamChannel(gateway: GatewaySecret, payload: Record<string, unknown>): Promise<void> {
   await callGateway(gateway, "mutate", "/api/channel/", { method: "POST", body: JSON.stringify(payload) }, 90_000);
 }

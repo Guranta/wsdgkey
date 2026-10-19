@@ -230,6 +230,24 @@ export async function demoRequest(gatewayId: string, path: string, init: Request
   if (!row || Number(row.upstream_missing) === 1) throw new UpstreamFailure("渠道不存在", false);
   return { success: true, data: rawChannel(row) };
   }
+  if (url.pathname === "/api/group/") {
+    const groups = new Set<string>(["default", "vip", "svip"]);
+    const rows = (await dbAll("SELECT group_name FROM channels WHERE gateway_id = ?", [gatewayId])) as Row[];
+    for (const row of rows) String(row.group_name ?? "").split(",").map((item) => item.trim()).filter(Boolean).forEach((item) => groups.add(item));
+    return { success: true, data: [...groups] };
+  }
+  if (url.pathname === "/api/pricing") {
+    const groups = new Set<string>(["default"]);
+    const rows = (await dbAll("SELECT models, group_name FROM channels WHERE gateway_id = ? AND upstream_missing = 0", [gatewayId])) as Row[];
+    const names = new Set<string>(["gpt-4o", "gpt-4o-mini", "claude-sonnet-4", "gemini-2.0-flash"]);
+    for (const row of rows) {
+      String(row.models ?? "").split(",").map((item) => item.trim()).filter(Boolean).forEach((item) => names.add(item));
+      String(row.group_name ?? "").split(",").map((item) => item.trim()).filter(Boolean).forEach((item) => groups.add(item));
+    }
+    return {
+      data: [...names].map((name) => ({ model_name: name, enable_groups: [...groups] })),
+    };
+  }
   throw new UpstreamFailure("演示网关没有这个接口", false);
 }
 

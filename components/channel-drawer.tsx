@@ -51,6 +51,34 @@ function Field({ label, children, hint }: { label: string; children: React.React
   );
 }
 
+type GatewayMeta = { groups: string[]; models: { name: string; groups: string[] }[]; unavailable?: boolean };
+
+type MapPair = { from: string; to: string };
+
+function parseMapping(raw: string): MapPair[] {
+  try {
+    const parsed = JSON.parse(raw || "{}") as Record<string, unknown>;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return [];
+    return Object.entries(parsed).map(([from, to]) => ({ from, to: String(to) }));
+  } catch {
+    return [];
+  }
+}
+
+function isFlatStringMap(raw: string): boolean {
+  try {
+    const parsed = JSON.parse(raw || "{}") as Record<string, unknown>;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return false;
+    return Object.values(parsed).every((value) => typeof value === "string");
+  } catch {
+    return false;
+  }
+}
+
+const chipBase = "inline-flex items-center gap-1 rounded-full border px-2.5 py-1 text-xs transition";
+const chipOn = `${chipBase} border-blue bg-blue/10 font-medium text-foreground`;
+const chipOff = `${chipBase} border-line bg-input text-secondary hover:bg-hover`;
+
 function fromChannel(item: DrawerChannel): ChannelFormValues {
   const form: ChannelFormValues = {
     ...CHANNEL_FORM_DEFAULT_VALUES,
@@ -139,17 +167,31 @@ export function ChannelDrawer({
   const [existingDupes, setExistingDupes] = useState(0);
   const [codexBusy, setCodexBusy] = useState(false);
   const [codexNote, setCodexNote] = useState("");
+  const [meta, setMeta] = useState<GatewayMeta | null>(null);
+  const [metaLoading, setMetaLoading] = useState(true);
+  const [modelInput, setModelInput] = useState("");
+  const [suggestOpen, setSuggestOpen] = useState(false);
+  const [suggestActive, setSuggestActive] = useState(0);
+  const [keyDropping, setKeyDropping] = useState(false);
+  const [customGroup, setCustomGroup] = useState("");
+  const [mappingRaw, setMappingRaw] = useState(() => editing !== null && !isFlatStringMap(editing.modelMapping));
+  const [pairs, setPairs] = useState<MapPair[]>(() => parseMapping(editing?.modelMapping ?? ""));
 
   const keys = splitKeys(form.key);
-  const lineWarnings = form.key.split("\n").map((line, index) => ({ index, text: keyLineWarnings(form.type, line)[0] ?? "" })).filter((item) => item.text);
+  const jsonKey = form.type === 57 || (form.type === 41 && (form.vertex_key_type || "json") === "json");
+  const lineWarnings = jsonKey
+    ? []
+    : form.key.split("\n").map((line, index) => ({ index, text: keyLineWarnings(form.type, line)[0] ?? "" })).filter((item) => item.text);
   const seen = new Set<string>();
   const duplicateLines: number[] = [];
-  form.key.split("\n").forEach((line, index) => {
-    const value = line.trim();
-    if (!value) return;
-    if (seen.has(value)) duplicateLines.push(index + 1);
-    seen.add(value);
-  });
+  if (!jsonKey) {
+    form.key.split("\n").forEach((line, index) => {
+      const value = line.trim();
+      if (!value) return;
+      if (seen.has(value)) duplicateLines.push(index + 1);
+      seen.add(value);
+    });
+  }
   const urlWarningKey = baseUrlWarning(form.base_url);
   const urlWarning = urlWarningKey ? t(urlWarningKey as "warnTrailingV1") : null;
   const typeMeta = channelTypeOption(form.type);
@@ -177,6 +219,74 @@ export function ChannelDrawer({
     }, 300);
     return () => window.clearTimeout(timer);
   }, [gatewayId, form.key]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      if (cancelled) return;
+      if (!gatewayId) {
+        setMeta(null);
+        setMetaLoading(false);
+        return;
+      }
+      setMetaLoading(true);
+      void fetch(`/api/channels/gateway-meta?gateway=${encodeURIComponent(gatewayId)}`)
+        .then((res) => (res.ok ? (res.json() as Promise<GatewayMeta>) : null))
+        .then((body) => {
+          if (!cancelled) setMeta(body ?? { groups: [], models: [], unavailable: true });
+        })
+        .catch(() => {
+          if (!cancelled) setMeta({ groups: [], models: [], unavailable: true });
+        })
+        .finally(() => {
+          if (!cancelled) setMetaLoading(false);
+        });
+    }, 0);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [gatewayId]);
+
+  const modelList = form.models.split(",").map((item) => item.trim()).filter(Boolean);
+  const modelSuggestions = useMemo(() => {
+    if (!meta || !meta.models.length) return [];
+    const query = modelInput.trim().toLowerCase();
+    return meta.models
+      .filter((item) => !modelList.includes(item.name))
+      .filter((item) => !query || item.name.toLowerCase().includes(query))
+      .slice(0, 50);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [meta, modelInput, form.models]);
+
+  function addModel(name: string) {
+    const clean = name.trim();
+    if (!clean) return;
+    if (!modelList.includes(clean)) patch({ models: [...modelList, clean].join(",") });
+    setModelInput("");
+    setSuggestActive(0);
+  }
+
+  function removeModel(name: string) {
+    patch({ models: modelList.filter((item) => item !== name).join(",") });
+  }
+
+  function toggleGroup(name: string) {
+    patch({ group: form.group.includes(name) ? form.group.filter((item) => item !== name) : [...form.group, name] });
+  }
+
+  function addCustomGroup() {
+    const clean = customGroup.trim();
+    setCustomGroup("");
+    if (!clean || form.group.includes(clean)) return;
+    patch({ group: [...form.group, clean] });
+  }
+
+  function commitPairs(next: MapPair[]) {
+    setPairs(next);
+    const entries = next.filter((pair) => pair.from.trim());
+    patch({ model_mapping: JSON.stringify(Object.fromEntries(entries.map((pair) => [pair.from.trim(), pair.to.trim()]))) });
+  }
 
   function patch(partial: Partial<ChannelFormValues>) {
     setForm((current) => ({ ...current, ...partial }));
@@ -424,13 +534,142 @@ export function ChannelDrawer({
                 </Field>
               ) : urlWarning ? <p className="text-xs text-warn">{urlWarning}</p> : null}
               <Field label={t("models")}>
-                <input className={fieldClass} value={form.models} placeholder={t("modelsPlaceholder")} onChange={(event) => patch({ models: event.target.value })} />
+                <div className="relative">
+                  <div className="flex min-h-10 flex-wrap items-center gap-1.5 rounded-control border border-line bg-input px-2 py-1.5 focus-within:border-blue focus-within:ring-2 focus-within:ring-blue/25">
+                    {modelList.map((item) => (
+                      <span key={item} className="inline-flex items-center gap-1 rounded-full bg-muted/70 px-2 py-0.5 font-mono text-xs text-foreground">
+                        {item}
+                        <button type="button" aria-label={t("removeModel", { name: item })} className="text-secondary hover:text-danger" onClick={() => removeModel(item)}>×</button>
+                      </span>
+                    ))}
+                    <input
+                      className="min-w-[140px] flex-1 bg-transparent px-1 text-sm outline-none"
+                      value={modelInput}
+                      placeholder={modelList.length ? "" : t("modelsChipPlaceholder")}
+                      onChange={(event) => {
+                        setModelInput(event.target.value);
+                        setSuggestActive(0);
+                        setSuggestOpen(true);
+                      }}
+                      onFocus={() => setSuggestOpen(true)}
+                      onBlur={() => window.setTimeout(() => setSuggestOpen(false), 150)}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter" || event.key === ",") {
+                          event.preventDefault();
+                          if (suggestOpen && modelSuggestions[suggestActive]) addModel(modelSuggestions[suggestActive]!.name);
+                          else addModel(modelInput);
+                          setSuggestOpen(false);
+                          return;
+                        }
+                        if (event.key === "ArrowDown" && suggestOpen && modelSuggestions.length) {
+                          event.preventDefault();
+                          setSuggestActive((index) => (index + 1) % modelSuggestions.length);
+                          return;
+                        }
+                        if (event.key === "ArrowUp" && suggestOpen && modelSuggestions.length) {
+                          event.preventDefault();
+                          setSuggestActive((index) => (index - 1 + modelSuggestions.length) % modelSuggestions.length);
+                          return;
+                        }
+                        if (event.key === "Backspace" && !modelInput && modelList.length) {
+                          removeModel(modelList[modelList.length - 1]!);
+                          return;
+                        }
+                        if (event.key === "Escape" && suggestOpen) {
+                          event.stopPropagation();
+                          setSuggestOpen(false);
+                        }
+                      }}
+                    />
+                  </div>
+                  {suggestOpen && modelSuggestions.length ? (
+                    <div className="absolute z-10 mt-1 max-h-56 w-full overflow-y-auto rounded-control border border-line bg-card py-1 shadow-[var(--shadow-card)]">
+                      <p className="px-3 py-1 text-xs text-muted">{t("modelsFromGateway", { count: modelSuggestions.length })}</p>
+                      {modelSuggestions.map((item, index) => (
+                        <button
+                          key={item.name}
+                          type="button"
+                          className={`flex w-full items-center justify-between gap-2 px-3 py-1.5 text-left text-sm hover:bg-hover${index === suggestActive ? " bg-hover" : ""}`}
+                          onMouseEnter={() => setSuggestActive(index)}
+                          onPointerDown={(event) => {
+                            event.preventDefault();
+                            addModel(item.name);
+                            setSuggestOpen(false);
+                          }}
+                        >
+                          <span className="font-mono text-xs">{item.name}</span>
+                          {item.groups.length ? <span className="truncate text-xs text-muted">{item.groups.join(", ")}</span> : null}
+                        </button>
+                      ))}
+                    </div>
+                  ) : null}
+                </div>
               </Field>
-              <Field label={t("group")}>
-                <input className={fieldClass} value={form.group.join(",")} onChange={(event) => patch({ group: event.target.value.split(",").map((item) => item.trim()).filter(Boolean) })} />
+              <Field label={t("group")} hint={meta && meta.unavailable ? t("groupFallback") : undefined}>
+                {metaLoading ? (
+                  <p className="text-xs text-muted">{t("metaLoading")}</p>
+                ) : meta && !meta.unavailable && meta.groups.length ? (
+                  <div className="flex flex-wrap gap-1.5">
+                    {meta.groups.map((item) => {
+                      const on = form.group.includes(item);
+                      return (
+                        <button key={item} type="button" role="checkbox" aria-checked={on} className={on ? chipOn : chipOff} onClick={() => toggleGroup(item)}>
+                          {on ? "✓ " : ""}
+                          {item}
+                        </button>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <input className={fieldClass} value={form.group.join(",")} onChange={(event) => patch({ group: event.target.value.split(",").map((item) => item.trim()).filter(Boolean) })} />
+                )}
+                <span className="mt-1.5 flex gap-1.5">
+                  <input
+                    className={fieldClass}
+                    value={customGroup}
+                    placeholder={t("customGroup")}
+                    onChange={(event) => setCustomGroup(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") {
+                        event.preventDefault();
+                        addCustomGroup();
+                      }
+                    }}
+                  />
+                  <button type="button" className={`${buttonClass("secondary")} shrink-0`} onClick={addCustomGroup}>{t("addGroup")}</button>
+                </span>
               </Field>
               <Field label={editing ? t("keyEdit") : t("key")} hint={typeMeta.keyHint || undefined}>
-                <textarea className={`${fieldClass} h-28 py-2 font-mono`} value={form.key} placeholder={typeMeta.keyHint || t("keyPlaceholder")} onChange={(event) => patch({ key: event.target.value })} />
+                {jsonKey ? (
+                  <div
+                    className={`rounded-control border border-dashed p-1 transition ${keyDropping ? "border-blue bg-blue/5" : "border-line"}`}
+                    onDragOver={(event) => {
+                      event.preventDefault();
+                      setKeyDropping(true);
+                    }}
+                    onDragLeave={() => setKeyDropping(false)}
+                    onDrop={(event) => {
+                      event.preventDefault();
+                      setKeyDropping(false);
+                      const file = event.dataTransfer.files[0];
+                      if (!file) return;
+                      void file
+                        .text()
+                        .then((text) => patch({ key: text.trim() }))
+                        .catch(() => undefined);
+                    }}
+                  >
+                    <textarea
+                      className={`${fieldClass} h-44 py-2 font-mono text-xs`}
+                      value={form.key}
+                      placeholder={t("vertexKeyPlaceholder")}
+                      onChange={(event) => patch({ key: event.target.value })}
+                    />
+                    <p className="px-2 pb-1 pt-0.5 text-xs text-muted">{t("vertexDropHint")}</p>
+                  </div>
+                ) : (
+                  <textarea className={`${fieldClass} h-28 py-2 font-mono`} value={form.key} placeholder={typeMeta.keyHint || t("keyPlaceholder")} onChange={(event) => patch({ key: event.target.value })} />
+                )}
               </Field>
               <p className="text-xs text-secondary">{t("recognized", { count: keys.length })}</p>
               {lineWarnings.map((item) => (
@@ -449,12 +688,6 @@ export function ChannelDrawer({
           ) : null}
           {tab === "routing" ? (
             <>
-              <Field label={t("priority")}>
-                <input className={fieldClass} type="number" value={form.priority ?? 0} onChange={(event) => patch({ priority: Number(event.target.value) })} />
-              </Field>
-              <Field label={t("weight")}>
-                <input className={fieldClass} type="number" value={form.weight ?? 0} onChange={(event) => patch({ weight: Number(event.target.value) })} />
-              </Field>
               <Field label={t("testModel")}>
                 <input className={fieldClass} value={form.test_model} placeholder={t("testModelPlaceholder")} onChange={(event) => patch({ test_model: event.target.value })} />
               </Field>
@@ -463,7 +696,39 @@ export function ChannelDrawer({
                 {t("autoBan")}
               </label>
               <Field label={t("modelMapping")}>
-                <textarea className={`${fieldClass} h-28 py-2 font-mono`} value={form.model_mapping} placeholder='{"gpt-4o-mini":"gpt-4o-mini"}' onChange={(event) => patch({ model_mapping: event.target.value })} />
+                {mappingRaw ? (
+                  <>
+                    <textarea
+                      className={`${fieldClass} h-28 py-2 font-mono`}
+                      value={form.model_mapping}
+                      placeholder='{"gpt-4o-mini":"gpt-4o-mini"}'
+                      onChange={(event) => {
+                        patch({ model_mapping: event.target.value });
+                        if (isFlatStringMap(event.target.value)) {
+                          setMappingRaw(false);
+                          setPairs(parseMapping(event.target.value));
+                        }
+                      }}
+                    />
+                    <span className="mt-1 block text-xs text-warn">{t("mappingRawHint")}</span>
+                  </>
+                ) : (
+                  <span className="block space-y-1.5">
+                    {pairs.length ? (
+                      pairs.map((pair, index) => (
+                        <span key={index} className="flex items-center gap-1.5">
+                          <input list="gateway-model-options" className={fieldClass} value={pair.from} placeholder="gpt-4o" aria-label={t("mappingFrom")} onChange={(event) => commitPairs(pairs.map((item, i) => (i === index ? { ...item, from: event.target.value } : item)))} />
+                          <span className="shrink-0 text-secondary">→</span>
+                          <input list="gateway-model-options" className={fieldClass} value={pair.to} placeholder="gpt-4o-2024-08-06" aria-label={t("mappingTo")} onChange={(event) => commitPairs(pairs.map((item, i) => (i === index ? { ...item, to: event.target.value } : item)))} />
+                          <button type="button" className={`${buttonClass("ghost")} h-10 shrink-0 px-2`} aria-label={t("removeMapping")} onClick={() => commitPairs(pairs.filter((_, i) => i !== index))}>×</button>
+                        </span>
+                      ))
+                    ) : (
+                      <span className="block text-xs text-muted">{t("mappingEmpty")}</span>
+                    )}
+                    <button type="button" className={`${buttonClass("secondary")} h-8`} onClick={() => commitPairs([...pairs, { from: "", to: "" }])}>{t("addMapping")}</button>
+                  </span>
+                )}
               </Field>
             </>
           ) : null}
@@ -517,6 +782,7 @@ export function ChannelDrawer({
             </>
           ) : null}
           {volcUnlocked && form.type === 45 ? <p className="text-xs text-warn">{t("volcUnlocked")}</p> : null}
+          <datalist id="gateway-model-options">{(meta?.models ?? []).map((item) => <option key={item.name} value={item.name} />)}</datalist>
         </div>
         <div className="flex justify-end gap-2 border-t border-line px-5 py-4">
           <button type="button" className={buttonClass("secondary")} onClick={onClose}>{common("cancel")}</button>
