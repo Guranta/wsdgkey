@@ -52,12 +52,12 @@ Dockerfile                   多阶段构建，uid 1001
 
 ## 五个导航
 
-侧栏顺序在 `components/shell.tsx`。文案来自 `messages/zh-CN.json` 的 `nav`。
+侧栏顺序在 `components/shell.tsx`。文案来自 `messages/zh-CN.json` 的 `nav`。「总览」（`/billing`，原「账单」）在最上面，顶部带渠道 KPI 卡与拉取队列（数据来自 `/api/channels` 的 stats），不含剩余额度。
 
 | 导航 | 路径 | 谁能看见 | 本站接口 | 打到 New API 的接口 |
 | --- | --- | --- | --- | --- |
-| 上 key（渠道） | `/channels` | 所有人 | `/api/channels`、`/api/channels/:id`、`/api/channels/:id/test`、`/api/channels/status`、`/api/channels/:id/rebind`、`/api/channels/:id/codex/refresh`、`/api/channels/key-check` | 见下方渠道一节 |
-| 账单 | `/billing` | 所有人 | `GET /api/billing` | 调度器拉基线时：`GET /api/channel/:id`，`GET /api/log/stat?type=2` |
+| 总览 | `/billing` | 所有人 | `GET /api/billing`、`GET /api/channels`（只取 stats） | 调度器拉基线时：`GET /api/channel/:id`，`GET /api/log/stat?type=2` |
+| 上 key（渠道） | `/channels` | 所有人 | `/api/channels`、`/api/channels/:id`、`/api/channels/:id/test`、`/api/channels/status`、`/api/channels/:id/rebind`、`/api/channels/:id/codex/refresh`、`/api/channels/key-check`、`/api/channels/gateway-meta`（转发网关的 `/api/group/` 与 `/api/pricing`，供抽屉勾选分组、搜索填入模型） | 见下方渠道一节 |
 | 对账 | `/recon` | 所有人，数据按角色过滤 | `GET/POST /api/recon`，导出 `/api/recon/export`，模板 `/api/recon/template` | 每个渠道的 `GET /api/log/stat?type=2&channel=`；另读一次不带 `channel` 的网关合计，用来判断「整个网关都没有日志」 |
 | 用户管理 | `/admin/users` | 仅管理员（侧栏过滤；`/admin` 与 `/users` 在 proxy 里对供应商返回 403） | `/api/admin/users` | 不调用 New API |
 | 设置 | `/settings` | 所有人。网关和限速只渲染给管理员 | `/api/gateways`、`/api/settings`、`/api/me/password` | 保存网关时不连上游。之后的同步才用保存的令牌 |

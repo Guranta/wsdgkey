@@ -1,8 +1,9 @@
 "use client";
 
+import { KpiRing, QueueStrip, deltaText, type QueueSnap } from "@/components/channels-view";
 import { useConnections } from "@/components/providers";
 import { Alert, buttonClass, Card, PageHeader, useIsClient } from "@/components/ui";
-import { formatDollars, formatUsd } from "@/lib/format";
+import { formatUsd } from "@/lib/format";
 import { formatShanghaiTime } from "@/lib/shanghai";
 import { useLocale, useTranslations } from "next-intl";
 import { Fragment, useEffect, useState } from "react";
@@ -122,42 +123,11 @@ function Donut({
   );
 }
 
-function RemainDonut({ used, remaining, empty, title, remainText }: { used: number; remaining: number; empty: string; title: string; remainText: (percent: number) => string }) {
-  const size = 168;
-  const stroke = 20;
-  const r = (size - stroke) / 2;
-  const c = 2 * Math.PI * r;
-  const safeUsed = Math.max(0, used);
-  const safeRemaining = Math.max(0, remaining);
-  const pool = safeUsed + safeRemaining;
-  const blank = pool <= 0;
-  const remainSweep = blank ? 0 : (safeRemaining / pool) * c;
-  const usedSweep = blank ? 0 : c - remainSweep;
-  const pct = blank ? 0 : Math.round((safeRemaining / pool) * 100);
-  return (
-    <Card className="flex flex-col p-4">
-      <h2 className="text-sm font-semibold">{title}</h2>
-      <div className="mt-3 flex flex-1 items-center justify-center">
-        <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} role="img" aria-label={title}>
-          <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke="#F0F0F0" strokeWidth={stroke} />
-          {blank ? null : (
-            <>
-              <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke="#0A0A0A" strokeWidth={stroke} strokeDasharray={`${usedSweep} ${c}`} transform={`rotate(-90 ${size / 2} ${size / 2})`} />
-              <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke="#34C759" strokeWidth={stroke} strokeDasharray={`${remainSweep} ${c}`} strokeDashoffset={-usedSweep} transform={`rotate(-90 ${size / 2} ${size / 2})`} />
-            </>
-          )}
-          <text x={size / 2} y={size / 2 - 2} textAnchor="middle" fontSize="13" fontWeight="700" fill="#0A0A0A">{blank ? empty : formatDollars(safeRemaining)}</text>
-          {blank ? null : <text x={size / 2} y={size / 2 + 16} textAnchor="middle" fontSize="11" fill="#8A8A8A">{remainText(pct)}</text>}
-        </svg>
-      </div>
-    </Card>
-  );
-}
-
 export function BillingView() {
   const { user } = useConnections();
   const hydrated = useIsClient();
   const t = useTranslations("billing");
+  const ct = useTranslations("channels");
   const errors = useTranslations("errors");
   const locale = useLocale();
   const [bill, setBill] = useState<Bill | null>(null);
@@ -187,6 +157,22 @@ export function BillingView() {
       window.clearInterval(timer);
     };
   }, [hydrated, unsynced, errors]);
+
+  const [overview, setOverview] = useState<{ total: number; running: number; anomaly: number; autoDisabled: number; pullFailed: number; todayQuota: number; yesterdayQuota: number; queue: QueueSnap } | null>(null);
+  useEffect(() => {
+    if (!hydrated) return;
+    let cancelled = false;
+    void fetch("/api/channels?page=1", { cache: "no-store" })
+      .then(async (res) => {
+        if (!res.ok || cancelled) return;
+        const body = (await res.json()) as { stats?: { total: number; running: number; anomaly: number; autoDisabled: number; pullFailed: number; todayQuota: number; yesterdayQuota: number; queue: QueueSnap } };
+        if (!cancelled && body.stats) setOverview(body.stats);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [hydrated]);
 
   function labelText(row: { label: string; kind?: string; spanDays: number }): string {
     const raw = row.label;
@@ -221,6 +207,17 @@ export function BillingView() {
   return (
     <div>
       <PageHeader title={t("title")} description={t("scope")} />
+      {overview ? (
+        <>
+          <div className="mb-3 grid grid-cols-2 gap-3 xl:grid-cols-4">
+            <KpiRing label={ct("stats.total")} value={overview.total.toLocaleString(locale)} ratio={1} tone="#0A0A0A" hint="" />
+            <KpiRing label={ct("stats.running")} value={overview.running.toLocaleString(locale)} ratio={overview.total ? overview.running / overview.total : 0} tone="#16A34A" hint={ct("stats.share", { percent: overview.total ? Math.round((overview.running / overview.total) * 1000) / 10 : 0 })} />
+            <KpiRing label={ct("stats.anomaly")} value={overview.anomaly.toLocaleString(locale)} ratio={overview.total ? overview.anomaly / overview.total : 0} tone="#DC2626" hint={ct("stats.anomalyHint", { auto: overview.autoDisabled, pull: overview.pullFailed })} />
+            <KpiRing label={ct("stats.today")} value={formatUsd(overview.todayQuota, locale)} ratio={overview.yesterdayQuota > 0 ? Math.min(1, overview.todayQuota / overview.yesterdayQuota) : 1} tone="#FF9500" hint={ct("stats.yesterday", { amount: formatUsd(overview.yesterdayQuota, locale), delta: deltaText(overview.todayQuota, overview.yesterdayQuota) })} />
+          </div>
+          {admin ? <div className="mb-3"><QueueStrip queue={overview.queue} admin={admin} /></div> : null}
+        </>
+      ) : null}
       {error ? <div className="mb-4"><Alert tone="danger">{error}</Alert></div> : null}
       <div className="mb-4 flex flex-wrap items-center gap-3 text-sm">
         <span className="text-secondary">{t("periodLine", { day: bill.billDay ?? "—" })}</span>
@@ -233,9 +230,8 @@ export function BillingView() {
         ) : null}
         {unsynced ? <button type="button" className={buttonClass("ghost", "h-8 text-sm")} onClick={() => setUnsynced(false)}>{t("showAll")}</button> : null}
       </div>
-      <div className="mb-4 grid items-stretch gap-3 xl:grid-cols-[minmax(0,1.5fr)_minmax(16rem,1fr)_16rem]">
+      <div className="mb-4 grid items-stretch gap-3 xl:grid-cols-[minmax(0,1.5fr)_16rem]">
         <Donut title={t("totalUse")} slices={bill.byType} size={240} stroke={28} center={money(bill.totalConsumption)} caption={t("usage")} empty={t("noData")} unknown={t("unknownSupplier")} money={money} />
-        <RemainDonut used={bill.usedUsd} remaining={bill.remainingBalance} empty={t("noData")} title={t("remainingTitle")} remainText={(percent) => t("remainingPct", { percent })} />
         <Card className="px-4 py-4">
           <div className="text-xs text-secondary">{t("excluded")}</div>
           <div className="mt-1 text-2xl font-semibold">{bill.unsyncedCount}</div>

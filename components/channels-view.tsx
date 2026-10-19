@@ -4,7 +4,7 @@ import { ChannelDrawer, type DrawerChannel } from "@/components/channel-drawer";
 import { useConnections } from "@/components/providers";
 import { Alert, accentIndex, buttonClass, Card, ConfirmDialog, PageHeader, useIsClient } from "@/components/ui";
 import { CHANNEL_ID_SEARCH_CAP, parseChannelKeyword, type ChannelSort } from "@/lib/channel-query";
-import { formatDollars, formatQuota, formatTimestamp, formatUsd } from "@/lib/format";
+import { formatQuota, formatTimestamp } from "@/lib/format";
 import { useLocale, useTranslations } from "next-intl";
 import { useEffect, useMemo, useState } from "react";
 
@@ -35,7 +35,7 @@ type ChannelItem = DrawerChannel & {
 };
 
 type Counts = { all: number; enabled: number; running: number; manual: number; auto: number; disabled: number; anomaly: number };
-type QueueSnap = { hits: number; limit: number; inflight: number; concurrency: number; channelPerMin: number; ok: number; queued: number; backoff: number; throttled: number; failed: number; unsynced: number };
+export type QueueSnap = { hits: number; limit: number; inflight: number; concurrency: number; channelPerMin: number; ok: number; queued: number; backoff: number; throttled: number; failed: number; unsynced: number };
 type Stats = {
   total: number;
   enabled: number;
@@ -82,8 +82,7 @@ type BulkBody = {
 const TABS = [
   ["", "all"],
   ["running", "running"],
-  ["manual", "manual"],
-  ["auto", "auto"],
+  ["disabled", "disabled"],
   ["anomaly", "anomaly"],
 ] as const;
 
@@ -123,7 +122,6 @@ export function ChannelsView() {
   const [confirm, setConfirm] = useState<{ ids: string[]; enabled: boolean; names: string[] } | null>(null);
   const [bulk, setBulk] = useState<{ enabled: boolean; ok: number; fail: number; again: number; failed: BulkItem[]; againItems: BulkItem[] } | null>(null);
   const [busy, setBusy] = useState(false);
-  const [banBusy, setBanBusy] = useState<string[]>([]);
   const [tick, setTick] = useState(0);
   const [bump, setBump] = useState(0);
   const parsedKeyword = parseChannelKeyword(keyword);
@@ -270,23 +268,6 @@ export function ChannelsView() {
     setBump((value) => value + 1);
   }
 
-  async function toggleAutoBan(item: ChannelItem) {
-    const next = !item.autoBan;
-    setData((current) => (current ? { ...current, items: current.items.map((row) => (row.id === item.id ? { ...row, autoBan: next } : row)) } : current));
-    setBanBusy((current) => [...current, item.id]);
-    const res = await fetch(`/api/channels/${item.id}`, {
-      method: "PATCH",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ autoBanOnly: true, auto_ban: next ? 1 : 0 }),
-    });
-    setBanBusy((current) => current.filter((id) => id !== item.id));
-    if (!res.ok && res.status !== 202) {
-      const body = (await res.json().catch(() => null)) as { error?: { message?: string } } | null;
-      setData((current) => (current ? { ...current, items: current.items.map((row) => (row.id === item.id ? { ...row, autoBan: item.autoBan } : row)) } : current));
-      setError(known(errors, body?.error?.message, errors("channelsSaveFailed")));
-    }
-  }
-
   function toggleSort(key: "before" | "today" | "total") {
     setPage(1);
     if (sort === key) setDir((value) => (value === "asc" ? "desc" : "asc"));
@@ -317,13 +298,10 @@ export function ChannelsView() {
     { key: "name", label: t("columns.name") },
     { key: "type", label: t("columns.type") },
     { key: "group", label: t("columns.group") },
-    { key: "before", label: t("columns.before"), sort: "before" },
     { key: "today", label: t("columns.today"), sort: "today" },
     { key: "total", label: t("columns.total"), sort: "total" },
     { key: "success", label: t("columns.success") },
-    { key: "balance", label: t("columns.balance") },
     { key: "status", label: t("columns.status") },
-    { key: "autoBan", label: t("columns.autoBan") },
     { key: "creator", label: t("columns.creator") },
     { key: "created", label: t("columns.created") },
     { key: "actions", label: t("columns.actions") },
@@ -335,20 +313,6 @@ export function ChannelsView() {
       <PageHeader
         title={t("title")}
         description={user?.role === "supplier" ? t("supplierDescription") : t("description")}
-        extra={
-          <div className="flex flex-wrap items-center gap-2">
-            <select className="h-9 max-w-64 rounded-control border-0 bg-input px-3 text-sm" value={gateway} onChange={(event) => { setGateway(event.target.value); setPage(1); setSelected([]); }} aria-label={t("gateway")}>
-              {data?.gateways.length ? null : <option value="">{t("noGateway")}</option>}
-              {(data?.gateways ?? []).map((item) => {
-                const host = item.baseUrl ? item.baseUrl.replace(/^https?:\/\//, "") : "";
-                return <option key={item.id} value={item.id}>{item.name}{host ? ` · ${host}` : ""}{item.demo ? ` · ${common("demo")}` : ""}</option>;
-              })}
-            </select>
-            <span title={gateway ? undefined : t("addDisabledTip")}>
-              <button type="button" className={buttonClass("primary")} onClick={() => setDrawer("add")} disabled={!gateway}>{t("add")}</button>
-            </span>
-          </div>
-        }
       />
       {error ? <div className="mb-4"><Alert tone="danger">{error}</Alert></div> : null}
       {notice ? <div className="mb-4"><Alert tone="info">{notice}</Alert></div> : null}
@@ -367,42 +331,49 @@ export function ChannelsView() {
       {!data && !loadError ? <ChannelSkeleton label={t("loading")} /> : null}
       {data ? (
         <>
-          <div className="mb-3 grid grid-cols-2 gap-3 xl:grid-cols-4">
-            <KpiRing label={t("stats.total")} value={data.stats.total.toLocaleString(locale)} ratio={1} tone="#0A0A0A" hint={data.gateways.find((item) => item.id === gateway)?.name ?? ""} />
-            <KpiRing label={t("stats.running")} value={data.stats.running.toLocaleString(locale)} ratio={data.stats.total ? data.stats.running / data.stats.total : 0} tone="#16A34A" hint={t("stats.share", { percent: data.stats.total ? Math.round((data.stats.running / data.stats.total) * 1000) / 10 : 0 })} />
-            <KpiRing label={t("stats.anomaly")} value={data.stats.anomaly.toLocaleString(locale)} ratio={data.stats.total ? data.stats.anomaly / data.stats.total : 0} tone="#DC2626" hint={t("stats.anomalyHint", { auto: data.stats.autoDisabled, pull: data.stats.pullFailed })} />
-            <KpiRing label={t("stats.today")} value={formatUsd(data.stats.todayQuota, locale)} ratio={data.stats.yesterdayQuota > 0 ? Math.min(1, data.stats.todayQuota / data.stats.yesterdayQuota) : 1} tone="#FF9500" hint={t("stats.yesterday", { amount: formatUsd(data.stats.yesterdayQuota, locale), delta: deltaText(data.stats.todayQuota, data.stats.yesterdayQuota) })} />
-          </div>
-          <QueueStrip queue={data.stats.queue} admin={user?.role === "admin"} />
           <Card className="mb-3 flex flex-col gap-3 p-3" aria-label={t("filtersLabel")}>
-            {filtersOpen ? (
-              <div className="flex flex-wrap items-center gap-2">
-                <ChipSearch value={keyword} placeholder={t("keywordPlaceholder")} recognized={parsedKeyword.recognized} onChange={(value) => { setKeyword(value); setPage(1); }} />
-                {loading ? <span className="text-xs text-muted">{t("loading")}</span> : null}
-                {data.truncated ? <span className="text-xs text-warn">{t("searchTruncated", { count: CHANNEL_ID_SEARCH_CAP })}</span> : null}
-                <select className="h-9 rounded-control border-0 bg-input px-3 text-sm" value={group} onChange={(event) => { setGroup(event.target.value); setPage(1); }} aria-label={t("group")}>
-                  <option value="">{t("group")}</option>
-                  {data.groups.map((item) => <option key={item}>{item}</option>)}
-                </select>
-                {user?.role === "admin" ? (
-                  <select className="h-9 rounded-control border-0 bg-input px-3 text-sm" value={creator} onChange={(event) => { setCreator(event.target.value); setPage(1); }} aria-label={t("creator")}>
-                    <option value="">{t("creator")}</option>
-                    {data.creators.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
-                  </select>
-                ) : null}
-                <select className="h-9 rounded-control border-0 bg-input px-3 text-sm" value={type} onChange={(event) => { setType(event.target.value); setPage(1); }} aria-label={t("type")}>
-                  <option value="">{t("type")}</option>
-                  {data.types.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
-                </select>
-                <button type="button" className={buttonClass("ghost", "h-9 text-sm")} onClick={() => { setKeyword(""); setGroup(""); setCreator(""); setType(""); setStatus(""); setPage(1); }}>{t("reset")}</button>
-                <button type="button" className={buttonClass("ghost", "h-9 text-sm")} onClick={() => setFiltersOpen(false)}>{t("collapse")}</button>
+            <div className="flex flex-wrap items-center gap-2">
+              <select className="h-9 max-w-60 rounded-control border-0 bg-input px-3 text-sm" value={gateway} onChange={(event) => { setGateway(event.target.value); setPage(1); setSelected([]); }} aria-label={t("gateway")}>
+                {data.gateways.length ? null : <option value="">{t("noGateway")}</option>}
+                {data.gateways.map((item) => {
+                  const host = item.baseUrl ? item.baseUrl.replace(/^https?:\/\//, "") : "";
+                  return <option key={item.id} value={item.id}>{item.name}{host ? ` · ${host}` : ""}{item.demo ? ` · ${common("demo")}` : ""}</option>;
+                })}
+              </select>
+              <span title={gateway ? undefined : t("addDisabledTip")}>
+                <button type="button" className={buttonClass("primary", "h-9")} onClick={() => setDrawer("add")} disabled={!gateway}>{t("add")}</button>
+              </span>
+              <div className="ml-auto">
+                <button type="button" className={buttonClass("ghost", "h-9 text-sm")} onClick={() => setFiltersOpen((value) => !value)}>{filtersOpen ? t("collapse") : t("filtersCollapsed")}</button>
               </div>
-            ) : (
-              <button type="button" className="text-left text-xs text-secondary" onClick={() => setFiltersOpen(true)}>{t("filtersCollapsed")}</button>
-            )}
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <ChipSearch value={keyword} placeholder={t("keywordPlaceholder")} recognized={parsedKeyword.recognized} onChange={(value) => { setKeyword(value); setPage(1); }} />
+              {loading ? <span className="text-xs text-muted">{t("loading")}</span> : null}
+              {data.truncated ? <span className="text-xs text-warn">{t("searchTruncated", { count: CHANNEL_ID_SEARCH_CAP })}</span> : null}
+              {filtersOpen ? (
+                <>
+                  <select className="h-9 rounded-control border-0 bg-input px-3 text-sm" value={group} onChange={(event) => { setGroup(event.target.value); setPage(1); }} aria-label={t("group")}>
+                    <option value="">{t("group")}</option>
+                    {data.groups.map((item) => <option key={item}>{item}</option>)}
+                  </select>
+                  {user?.role === "admin" ? (
+                    <select className="h-9 rounded-control border-0 bg-input px-3 text-sm" value={creator} onChange={(event) => { setCreator(event.target.value); setPage(1); }} aria-label={t("creator")}>
+                      <option value="">{t("creator")}</option>
+                      {data.creators.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+                    </select>
+                  ) : null}
+                  <select className="h-9 rounded-control border-0 bg-input px-3 text-sm" value={type} onChange={(event) => { setType(event.target.value); setPage(1); }} aria-label={t("type")}>
+                    <option value="">{t("type")}</option>
+                    {data.types.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+                  </select>
+                  <button type="button" className={buttonClass("ghost", "h-9 text-sm")} onClick={() => { setKeyword(""); setGroup(""); setCreator(""); setType(""); setStatus(""); setPage(1); }}>{t("reset")}</button>
+                </>
+              ) : null}
+            </div>
             <div className="inline-flex w-fit max-w-full flex-wrap rounded-full bg-input p-1" role="group" aria-label={t("status")}>
               {TABS.map(([value, key]) => (
-                <button key={key} type="button" className={status === value ? "rounded-full bg-card px-3 py-1 text-xs font-semibold text-foreground shadow-sm" : "rounded-full px-3 py-1 text-xs text-secondary"} onClick={() => { setStatus(value); setPage(1); setSelected([]); }}>
+                <button key={key} type="button" className={status === value ? "rounded-full bg-card px-3.5 py-1.5 text-sm font-semibold text-foreground shadow-sm" : "rounded-full px-3.5 py-1.5 text-sm text-secondary"} onClick={() => { setStatus(value); setPage(1); setSelected([]); }}>
                   {t(`tabs.${key}`)} {data.counts[key].toLocaleString(locale)}
                 </button>
               ))}
@@ -416,9 +387,9 @@ export function ChannelsView() {
             <span className="text-xs text-muted">{t("pageOnly")}</span>
           </div>
           <Card>
-            <div className="max-h-[calc(100vh-22rem)] overflow-auto">
+            <div className="max-h-[calc(100vh-15rem)] overflow-auto">
               <table className="w-max min-w-full text-left text-sm">
-                <thead className="sticky top-0 z-10 bg-card text-[13px] font-semibold text-secondary shadow-[0_1px_0_var(--border)]">
+                <thead className="sticky top-0 z-10 bg-card text-sm font-semibold text-secondary shadow-[0_1px_0_var(--border)]">
                   <tr>
                     <th className="whitespace-nowrap px-4 py-3"><input type="checkbox" checked={allChecked} onChange={(event) => setSelected(event.target.checked ? items.map((item) => item.id) : [])} aria-label={t("selectPage")} /></th>
                     {columns.map((column) => (
@@ -459,62 +430,48 @@ export function ChannelsView() {
                     const dot = tone === "ok" ? "bg-ok" : tone === "danger" ? "bg-danger" : tone === "warn" ? "bg-warn" : "bg-muted";
                     return (
                       <tr key={item.id} className="group border-t border-line hover:bg-hover">
-                        <td className="px-4 py-4"><input type="checkbox" checked={selected.includes(item.id)} onChange={(event) => setSelected((current) => event.target.checked ? [...current, item.id] : current.filter((id) => id !== item.id))} aria-label={t("selectRow", { name: item.name })} /></td>
-                        <td className="whitespace-nowrap px-4 py-4 font-mono text-xs text-muted">#{item.upstreamId}</td>
-                        <td className="whitespace-nowrap px-4 py-4 font-medium">{item.name}</td>
-                        <td className="whitespace-nowrap px-4 py-4">
-                          <span className="inline-flex items-center gap-2 text-xs">
+                        <td className="px-4 py-3.5"><input type="checkbox" checked={selected.includes(item.id)} onChange={(event) => setSelected((current) => event.target.checked ? [...current, item.id] : current.filter((id) => id !== item.id))} aria-label={t("selectRow", { name: item.name })} /></td>
+                        <td className="whitespace-nowrap px-4 py-3.5 font-mono text-[13px] text-muted">#{item.upstreamId}</td>
+                        <td className="whitespace-nowrap px-4 py-3.5 font-medium">{item.name}</td>
+                        <td className="whitespace-nowrap px-4 py-3.5">
+                          <span className="inline-flex items-center gap-2 text-sm">
                             <FamilyAvatar type={item.type} name={item.typeName} />
                             {item.typeName}
                           </span>
                         </td>
-                        <td className="whitespace-nowrap px-4 py-4"><GroupChip name={item.group} /></td>
-                        <td className="whitespace-nowrap px-4 py-4 text-xs tabular-nums">{quota(item.beforeQuota)}</td>
-                        <td className="whitespace-nowrap px-4 py-4 text-xs font-semibold tabular-nums">
+                        <td className="whitespace-nowrap px-4 py-3.5"><GroupChip name={item.group} /></td>
+                        <td className="whitespace-nowrap px-4 py-3.5 text-[13px] font-semibold tabular-nums">
                           <div>{quota(item.todayQuota)}</div>
                           <span className="mt-1 block h-[3px] w-14 overflow-hidden rounded-full bg-[#F0F0F0]"><span className="block h-full bg-foreground" style={{ width: `${todayShare(item.todayQuota, items)}%` }} /></span>
                         </td>
-                        <td className="whitespace-nowrap px-4 py-4 text-xs tabular-nums">{quota(item.usedQuota)}</td>
-                        <td className="whitespace-nowrap px-4 py-4 text-xs tabular-nums">
+                        <td className="whitespace-nowrap px-4 py-3.5 text-[13px] tabular-nums">{quota(item.usedQuota)}</td>
+                        <td className="whitespace-nowrap px-4 py-3.5 text-[13px] tabular-nums">
                           <span className={successTone(item.successRate)}>{item.successRate === null ? common("dash") : `${Math.round(item.successRate * 100)}%`}</span>
                         </td>
-                        <td className="whitespace-nowrap px-4 py-4 text-xs">
-                          <div className="flex items-center gap-1.5">{item.balance === null ? common("dash") : formatDollars(item.balance, locale)}<span className={`h-1.5 w-1.5 rounded-full ${item.syncStatus === "ok" ? "bg-ok" : "bg-warn"}`} /></div>
-                          <div className="text-[11px] text-muted">{item.lastSyncAt ? t("updatedAgo", { when: formatTimestamp(item.lastSyncAt, locale) }) : t("notSynced")}</div>
-                        </td>
-                        <td className="whitespace-nowrap px-4 py-4">
+                        <td className="whitespace-nowrap px-4 py-3.5">
                           <span className={`inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-xs font-medium ${pill}`}>
                             <span className={`h-1.5 w-1.5 rounded-full ${dot}`} />
                             {statusLabel}
                           </span>
                           {item.autoDisabled && (reasonText || item.autoDisabledAt) ? (
-                            <div className="mt-1 max-w-52 truncate text-[11px] text-muted" title={reasonText}>{[reasonText, item.autoDisabledAt ? formatTimestamp(item.autoDisabledAt, locale) : ""].filter(Boolean).join(" · ")}</div>
+                            <div className="mt-1 max-w-52 truncate text-xs text-muted" title={reasonText}>{[reasonText, item.autoDisabledAt ? formatTimestamp(item.autoDisabledAt, locale) : ""].filter(Boolean).join(" · ")}</div>
                           ) : null}
-                          {item.upstreamMissing ? <div className="mt-1 text-[11px] text-muted">{t("missingId", { id: item.upstreamId })}</div> : null}
-                        </td>
-                        <td className="whitespace-nowrap px-4 py-4">
-                          <button
-                            type="button"
-                            role="switch"
-                            aria-checked={item.autoBan}
-                            aria-label={t("autoBanToggle")}
-                            disabled={banBusy.includes(item.id)}
-                            className={`relative h-5 w-9 rounded-full transition ${item.autoBan ? "bg-ok" : "border border-line bg-input"}`}
-                            onClick={() => void toggleAutoBan(item)}
-                          >
-                            <span className={`absolute top-0.5 h-4 w-4 rounded-full bg-card shadow ${item.autoBan ? "left-4" : "left-0.5"}`} />
-                          </button>
-                        </td>
-                        {user?.role === "admin" ? <td className="whitespace-nowrap px-4 py-4 text-xs text-secondary">{item.creatorName || t("unknownCreator")}</td> : null}
-                        <td className="whitespace-nowrap px-4 py-4 text-xs text-muted">{formatTimestamp(item.createdAt, locale)}</td>
-                        <td className="sticky right-0 whitespace-nowrap bg-card px-4 py-4 group-hover:bg-hover">
-                          <div className="flex gap-1 opacity-50 transition group-hover:opacity-100 group-focus-within:opacity-100">
-                            <button type="button" className={buttonClass("ghost", "h-8 px-2")} onClick={() => void testOne(item.id)}>{t("test")}</button>
-                            <button type="button" className={buttonClass("ghost", "h-8 px-2")} onClick={() => setDrawer(item)}>{t("edit")}</button>
-                            <button type="button" className={buttonClass("ghost", "h-8 px-2")} onClick={() => setConfirm({ ids: [item.id], enabled: item.status !== "enabled", names: [`#${item.upstreamId} ${item.name}`] })}>{item.status === "enabled" ? t("disable") : t("enable")}</button>
-                            {user?.role === "admin" && item.upstreamMissing ? <button type="button" className={buttonClass("ghost", "h-8 px-2")} onClick={() => { setRebind(item); setRebindId(""); }}>{t("rebind")}</button> : null}
+                          {item.upstreamMissing ? <div className="mt-1 text-xs text-muted">{t("missingId", { id: item.upstreamId })}</div> : null}
+                          <div className="mt-1 flex items-center gap-1.5 text-xs text-muted">
+                            <span className={`h-1.5 w-1.5 rounded-full ${item.syncStatus === "ok" ? "bg-ok" : "bg-warn"}`} />
+                            {item.lastSyncAt ? t("updatedAgo", { when: formatTimestamp(item.lastSyncAt, locale) }) : t("notSynced")}
                           </div>
-                          <div className="mt-1 text-[11px] text-muted">{testText(item)}</div>
+                        </td>
+                        {user?.role === "admin" ? <td className="whitespace-nowrap px-4 py-3.5 text-[13px] text-secondary">{item.creatorName || t("unknownCreator")}</td> : null}
+                        <td className="whitespace-nowrap px-4 py-3.5 text-[13px] text-muted">{formatTimestamp(item.createdAt, locale)}</td>
+                        <td className="sticky right-0 whitespace-nowrap bg-card px-3 py-3.5 group-hover:bg-hover">
+                          <div className="flex justify-end gap-0.5 opacity-70 transition group-hover:opacity-100 group-focus-within:opacity-100">
+                            <button type="button" className={buttonClass("ghost", "h-7 px-2 text-xs")} onClick={() => void testOne(item.id)}>{t("test")}</button>
+                            <button type="button" className={buttonClass("ghost", "h-7 px-2 text-xs")} onClick={() => setDrawer(item)}>{t("edit")}</button>
+                            <button type="button" className={buttonClass("ghost", "h-7 px-2 text-xs")} onClick={() => setConfirm({ ids: [item.id], enabled: item.status !== "enabled", names: [`#${item.upstreamId} ${item.name}`] })}>{item.status === "enabled" ? t("disable") : t("enable")}</button>
+                            {user?.role === "admin" && item.upstreamMissing ? <button type="button" className={buttonClass("ghost", "h-7 px-2 text-xs")} onClick={() => { setRebind(item); setRebindId(""); }}>{t("rebind")}</button> : null}
+                          </div>
+                          <div className="mt-0.5 max-w-64 truncate text-right text-xs text-muted" title={testText(item)}>{testText(item)}</div>
                         </td>
                       </tr>
                     );
@@ -635,7 +592,7 @@ function pageList(page: number, pageCount: number): number[] {
   return Array.from({ length: end - start + 1 }, (_, index) => start + index);
 }
 
-function deltaText(today: number, yesterday: number): string {
+export function deltaText(today: number, yesterday: number): string {
   if (!yesterday) return "—";
   const pct = ((today - yesterday) / Math.abs(yesterday)) * 100;
   const rounded = Math.round(pct * 10) / 10;
@@ -669,7 +626,7 @@ function FamilyAvatar({ type, name }: { type: number; name: string }) {
   return <span className="inline-flex h-5 w-5 items-center justify-center rounded-[6px] text-[10px] font-semibold text-white" style={{ background: family.color }} title={name}>{family.letter}</span>;
 }
 
-function KpiRing({ label, value, ratio, tone, hint }: { label: string; value: string; ratio: number; tone: string; hint: string }) {
+export function KpiRing({ label, value, ratio, tone, hint }: { label: string; value: string; ratio: number; tone: string; hint: string }) {
   const radius = 16;
   const turn = 2 * Math.PI * radius;
   const filled = turn * Math.max(0, Math.min(1, ratio));
@@ -688,7 +645,7 @@ function KpiRing({ label, value, ratio, tone, hint }: { label: string; value: st
   );
 }
 
-function QueueStrip({ queue, admin }: { queue: QueueSnap; admin: boolean }) {
+export function QueueStrip({ queue, admin }: { queue: QueueSnap; admin: boolean }) {
   const t = useTranslations("channels");
   const ratio = queue.limit ? Math.min(1, queue.hits / queue.limit) : 0;
   return (
