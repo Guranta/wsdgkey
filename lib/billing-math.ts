@@ -2,7 +2,7 @@ import { addDays, daysBetween } from "./shanghai";
 
 export type BaselinePoint = { day: string; baseline: number; source?: string };
 
-const NEAR_MIDNIGHT_MS = 15 * 60 * 1000;
+export const NEAR_MIDNIGHT_MS = 15 * 60 * 1000;
 
 /**
  * New API stores cumulative `used_quota` on the channel.
@@ -113,6 +113,23 @@ export function resolveConsumption(billDay: string, baselines: BaselinePoint[]):
  * Gateway-wide totals are not compared: they include channels this app did not create.
  * `logQuota` is the log-stat figure with model-test consume already removed.
  */
+/**
+ * Seller bills use adjacent used_quota snapshots only.
+ * A missing side stays unsynced: never 0, never a span, never an average.
+ * `import-anchor` and `create` on the close day are the baseline itself, not a bill.
+ */
+export function resolveSellerConsumption(billDay: string, baselines: BaselinePoint[]): Consumption {
+  const closeDay = addDays(billDay, 1);
+  const close = baselines.find((item) => item.day === closeDay);
+  if (!close) return { kind: "unsynced" };
+  if (close.source === "create" || close.source === "import-anchor") return { kind: "skip" };
+  const prior = baselines.find((item) => item.day === billDay);
+  if (!prior) return { kind: "unsynced" };
+  const consumption = close.baseline - prior.baseline;
+  if (!Number.isFinite(consumption)) return { kind: "unsynced" };
+  return { kind: "amount", startDay: billDay, endDay: billDay, days: 1, label: null, consumption };
+}
+
 export function reconcileFinding(input: { missing: boolean; consumption: number | null; logQuota: number | null }): string {
   if (input.missing) return "missing";
   if (input.consumption === null || input.logQuota === null) return "";

@@ -2,14 +2,35 @@
 
 import { useConnections } from "@/components/providers";
 import { BRAND_NAME } from "@/lib/brand";
+import { suggestSellerGatewayName } from "@/lib/seller-name";
+import { formatShanghaiTime } from "@/lib/shanghai";
 import { Alert, buttonClass, Card, fieldClass, PageHeader, useIsClient } from "@/components/ui";
-import { useTranslations } from "next-intl";
+import { useLocale, useTranslations } from "next-intl";
 import { useEffect, useState } from "react";
 
-type Gateway = { id: string; name: string; baseUrl: string; adminUserId: string; demo: boolean; tokenSet: boolean; tokenMasked?: string; disabled?: boolean; channelCount?: number; lastSyncAt?: number | null };
+type Gateway = {
+  id: string;
+  name: string;
+  baseUrl: string;
+  adminUserId: string;
+  demo: boolean;
+  tokenSet: boolean;
+  tokenMasked?: string;
+  disabled?: boolean;
+  channelCount?: number;
+  lastSyncAt?: number | null;
+  kind?: "newapi_admin" | "newapi_seller";
+  username?: string;
+  authStatus?: string;
+  authError?: string;
+  authCheckedAt?: number | null;
+  accessExpiresAt?: number | null;
+};
 type Limits = { siteName: string; gatewayPerMin: number; channelPerMin: number; concurrency: number; testCooldownMin: number; quotaPerUnit: number; reconTolerancePct: number; zeroDays: number; manualTolerancePct: number };
+type Draft = { id: string; kind: "newapi_admin" | "newapi_seller"; name: string; baseUrl: string; adminUserId: string; token: string; username: string; password: string; nameTouched: boolean };
 
 const EMPTY: Limits = { siteName: BRAND_NAME, gatewayPerMin: 60, channelPerMin: 5, concurrency: 3, testCooldownMin: 10, quotaPerUnit: 500000, reconTolerancePct: 1, zeroDays: 3, manualTolerancePct: 2 };
+const BLANK: Draft = { id: "", kind: "newapi_admin", name: "", baseUrl: "", adminUserId: "1", token: "", username: "", password: "", nameTouched: false };
 
 export function SettingsView() {
   const { ready, user, logout, reload } = useConnections();
@@ -17,11 +38,14 @@ export function SettingsView() {
   const t = useTranslations("settings");
   const common = useTranslations("common");
   const errors = useTranslations("errors");
+  const locale = useLocale();
   const [gateways, setGateways] = useState<Gateway[]>([]);
   const [limits, setLimits] = useState<Limits>(EMPTY);
   const [saved, setSaved] = useState<Limits>(EMPTY);
-  const [form, setForm] = useState({ name: "", baseUrl: "", adminUserId: "1", token: "" });
+  const [form, setForm] = useState<Draft>(BLANK);
   const [adding, setAdding] = useState(false);
+  const [showPassword, setShowPassword] = useState(false);
+  const [probe, setProbe] = useState<{ id: string; latencyMs: number; expiresAt: number } | null>(null);
   const [passwords, setPasswords] = useState({ current: "", next: "" });
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
@@ -30,8 +54,8 @@ export function SettingsView() {
 
   async function load() {
     const limitRes = admin ? await fetch("/api/settings", { cache: "no-store" }) : null;
-    const gatewayRes = admin ? await fetch("/api/gateways", { cache: "no-store" }) : null;
-    if (gatewayRes?.ok) setGateways((await gatewayRes.json()) as Gateway[]);
+    const gatewayRes = await fetch("/api/gateways", { cache: "no-store" });
+    if (gatewayRes.ok) setGateways((await gatewayRes.json()) as Gateway[]);
     if (limitRes?.ok) {
       const body = (await limitRes.json()) as Limits;
       setLimits(body);
@@ -40,31 +64,76 @@ export function SettingsView() {
   }
 
   useEffect(() => {
-    if (!ready || !admin) return;
+    if (!ready) return;
     const timer = window.setTimeout(() => {
       void load();
     }, 0);
     return () => window.clearTimeout(timer);
-    // load closes over the latest admin flag; the effect re-runs when that flag changes.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ready, admin]);
 
   const dirty = admin && JSON.stringify(limits) !== JSON.stringify(saved);
+  const seller = form.kind === "newapi_seller";
+  const alerts = user?.renewalAlerts ?? [];
+
+  function openAdd(kind: Draft["kind"] = admin ? "newapi_admin" : "newapi_seller") {
+    setForm({ ...BLANK, kind, name: kind === "newapi_seller" ? suggestSellerGatewayName("") : "" });
+    setProbe(null);
+    setShowPassword(false);
+    setAdding(true);
+    setError("");
+  }
+
+  function patch(next: Partial<Draft>, touchName = false) {
+    setForm((current) => {
+      const merged = { ...current, ...next, nameTouched: touchName ? true : current.nameTouched };
+      if (merged.kind === "newapi_seller" && !merged.nameTouched && "baseUrl" in next) merged.name = suggestSellerGatewayName(merged.baseUrl);
+      return merged;
+    });
+    setProbe(null);
+  }
+
+  async function testSeller() {
+    setBusy(true);
+    setError("");
+    const res = await fetch("/api/gateways/probe", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ baseUrl: form.baseUrl, username: form.username, password: form.password }),
+    });
+    setBusy(false);
+    const body = (await res.json().catch(() => null)) as { error?: { message?: string }; probeId?: string; latencyMs?: number; expiresAt?: number } | null;
+    if (!res.ok || !body?.probeId) {
+      setProbe(null);
+      setError(body?.error?.message || errors("sellerAuthFailed"));
+      return;
+    }
+    setProbe({ id: body.probeId, latencyMs: body.latencyMs ?? 0, expiresAt: body.expiresAt ?? 0 });
+  }
 
   async function addGateway() {
     setBusy(true);
     setError("");
-    const res = await fetch("/api/gateways", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(form) });
+    const payload = seller
+      ? { kind: "newapi_seller", name: form.name, baseUrl: form.baseUrl, username: form.username, password: form.password, probeId: probe?.id ?? "" }
+      : { name: form.name, baseUrl: form.baseUrl, adminUserId: form.adminUserId, token: form.token };
+    const res = await fetch(form.id ? `/api/gateways/${form.id}` : "/api/gateways", {
+      method: form.id ? "PATCH" : "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(payload),
+    });
     setBusy(false);
     const body = (await res.json().catch(() => null)) as { error?: { message?: string } } | null;
     if (!res.ok) {
       setError(body?.error?.message || errors("gatewaySaveFailed"));
       return;
     }
-    setForm({ name: "", baseUrl: "", adminUserId: "1", token: "" });
+    setForm(BLANK);
+    setProbe(null);
     setAdding(false);
-    setNotice(t("savedGateway"));
+    setNotice(seller ? t("sellerSaved") : t("savedGateway"));
     await load();
+    await reload();
   }
 
   async function saveLimits() {
@@ -118,10 +187,21 @@ export function SettingsView() {
   }
 
   if (!hydrated || !ready) return <p className="text-sm text-muted">{t("loading")}</p>;
+  const knownError = (value: string) => ((errors as unknown as { has: (key: string) => boolean }).has(value) ? errors(value as "sellerAuthFailed") : value);
 
   return (
     <div className="mx-auto max-w-[640px] pb-24">
       <PageHeader title={t("title")} description={admin ? t("description") : t("supplierHint")} />
+      {alerts.map((item) => (
+        <div key={item.id} className="mb-4 rounded-control bg-warn-soft px-4 py-3 text-sm leading-5 break-words text-warn">
+          {t("renewalBanner", {
+            name: item.name,
+            when: formatShanghaiTime(item.checkedAt, locale),
+            detail: item.detail ? knownError(item.detail) : "—",
+            expires: formatShanghaiTime(item.expiresAt, locale),
+          })}
+        </div>
+      ))}
       {error ? <div className="mb-4"><Alert tone="danger">{error}</Alert></div> : null}
       {notice ? <div className="mb-4"><Alert tone="info">{notice}</Alert></div> : null}
       <Card className="mb-4 p-5">
@@ -137,40 +217,61 @@ export function SettingsView() {
         </form>
       </Card>
       {admin ? (
-        <>
-          <Card className="mb-4 p-5">
-            <h2 className="text-sm font-medium">{t("site")}</h2>
-            <label className="mt-4 block text-sm">
-              <span className="mb-1.5 block text-secondary">{t("siteName")}</span>
-              <input className={fieldClass} maxLength={40} value={limits.siteName} onChange={(event) => setLimits({ ...limits, siteName: event.target.value })} />
-            </label>
-          </Card>
-          <Card className="mb-4 p-5">
-            <div className="flex items-center justify-between gap-3">
-              <h2 className="text-sm font-medium">{t("gateways")}</h2>
-              <button type="button" className={buttonClass("primary", "h-9")} onClick={() => setAdding(true)}>{t("addGateway")}</button>
-            </div>
-            <ul className="mt-3 space-y-2">
-              {gateways.length === 0 ? <li className="text-sm text-muted">{t("noGateways")}</li> : gateways.map((item) => (
-                <li key={item.id} className="rounded-[14px] border border-line px-3 py-3">
-                  <div className="flex items-start justify-between gap-3">
-                    <div>
-                      <div className="text-sm font-medium">{item.name}</div>
-                      <div className="mt-1 text-xs text-muted">{item.baseUrl}</div>
-                      <div className="mt-1 text-xs text-muted">{item.tokenMasked || (item.demo ? common("demo") : t("tokenMissing"))} · {t("channelCount", { count: item.channelCount ?? 0 })}</div>
+        <Card className="mb-4 p-5">
+          <h2 className="text-sm font-medium">{t("site")}</h2>
+          <label className="mt-4 block text-sm">
+            <span className="mb-1.5 block text-secondary">{t("siteName")}</span>
+            <input className={fieldClass} maxLength={40} value={limits.siteName} onChange={(event) => setLimits({ ...limits, siteName: event.target.value })} />
+          </label>
+        </Card>
+      ) : null}
+      <Card className="mb-4 p-5">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <h2 className="text-sm font-medium">{t("gateways")}</h2>
+          <button type="button" className={buttonClass("primary", "h-9")} onClick={() => openAdd()}>{t("addGateway")}</button>
+        </div>
+        <ul className="mt-3 space-y-2">
+          {gateways.length === 0 ? <li className="text-sm text-muted">{t("noGateways")}</li> : gateways.map((item) => {
+            const isSeller = item.kind === "newapi_seller";
+            const failed = isSeller && item.authStatus === "failed";
+            return (
+              <li key={item.id} className="rounded-[14px] border border-line px-3 py-3">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="text-sm font-medium break-words">{item.name}</span>
+                      {isSeller ? <span className="whitespace-nowrap rounded-full border border-line px-2 py-0.5 text-xs text-secondary">{t("kindSeller")}</span> : null}
+                      {isSeller ? (
+                        <span className={`whitespace-nowrap rounded-full px-2 py-0.5 text-xs ${failed ? "bg-warn-soft text-warn" : "bg-ok-soft text-ok"}`} title={failed ? `${formatShanghaiTime(item.authCheckedAt, locale)} ${knownError(item.authError || "")}` : undefined}>
+                          {failed ? t("renewFailed") : t("renewOk")}
+                        </span>
+                      ) : null}
                     </div>
-                    <span className={`rounded-full px-2 py-0.5 text-xs ${item.disabled ? "bg-input text-muted" : item.tokenSet || item.demo ? "bg-ok-soft text-ok" : "bg-danger-soft text-danger"}`}>
-                      {item.disabled ? t("deactivated") : item.tokenSet || item.demo ? t("connected") : t("tokenInvalid")}
-                    </span>
+                    <div className="mt-1 break-all text-xs text-muted">{item.baseUrl}</div>
+                    <div className="mt-1 break-words text-xs text-muted">
+                      {isSeller ? t("accountLabel", { name: item.username || "—" }) : item.tokenMasked || (item.demo ? common("demo") : t("tokenMissing"))}
+                      {" · "}
+                      {t("channelCount", { count: item.channelCount ?? 0 })}
+                    </div>
                   </div>
-                  <div className="mt-2 flex gap-2">
-                    <button type="button" className={buttonClass("ghost", "h-8 px-2")} onClick={() => void toggleGateway(item)}>{item.disabled ? t("enableGateway") : t("deactivate")}</button>
-                    <button type="button" className={buttonClass("ghost", "h-8 px-2")} disabled={busy} onClick={() => void loadDemo()}>{t("loadDemo")}</button>
-                  </div>
-                </li>
-              ))}
-            </ul>
-          </Card>
+                  <span className={`whitespace-nowrap rounded-full px-2 py-0.5 text-xs ${item.disabled ? "bg-input text-muted" : failed ? "bg-warn-soft text-warn" : item.tokenSet || item.demo ? "bg-ok-soft text-ok" : "bg-danger-soft text-danger"}`}>
+                    {item.disabled ? t("deactivated") : failed ? t("connectionError") : item.tokenSet || item.demo ? t("connected") : t("tokenInvalid")}
+                  </span>
+                </div>
+                <div className="mt-2 flex flex-wrap gap-2">
+                  <button type="button" className={buttonClass("ghost", "h-8 px-2")} onClick={() => void toggleGateway(item)}>{item.disabled ? t("enableGateway") : t("deactivate")}</button>
+                  {isSeller ? (
+                    <button type="button" className={buttonClass("ghost", "h-8 px-2")} onClick={() => { setForm({ ...BLANK, id: item.id, kind: "newapi_seller", name: item.name, baseUrl: item.baseUrl, username: item.username || "", nameTouched: true }); setProbe(null); setAdding(true); }}>{t("updateCredentials")}</button>
+                  ) : null}
+                  {admin && !isSeller ? <button type="button" className={buttonClass("ghost", "h-8 px-2")} disabled={busy} onClick={() => void loadDemo()}>{t("loadDemo")}</button> : null}
+                </div>
+              </li>
+            );
+          })}
+        </ul>
+      </Card>
+      {admin ? (
+        <>
           <Card className="mb-4 p-5">
             <h2 className="text-sm font-medium">{t("limits")}</h2>
             <div className="mt-4 grid gap-3 sm:grid-cols-3">
@@ -195,24 +296,63 @@ export function SettingsView() {
       {adding ? (
         <div className="fixed inset-0 z-50 flex justify-end bg-foreground/35">
           <form className="flex h-full w-full max-w-[440px] flex-col bg-card p-5" onSubmit={(event) => { event.preventDefault(); void addGateway(); }}>
-            <h2 className="text-base font-semibold">{t("addGateway")}</h2>
-            <div className="mt-4 space-y-3">
-              <input className={fieldClass} placeholder={t("name")} value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} />
-              <input className={fieldClass} placeholder={t("baseUrl")} value={form.baseUrl} onChange={(event) => setForm({ ...form, baseUrl: event.target.value })} />
-              <input className={fieldClass} placeholder={t("adminUserId")} value={form.adminUserId} onChange={(event) => setForm({ ...form, adminUserId: event.target.value })} />
-              <input className={fieldClass} placeholder={t("token")} type="password" value={form.token} onChange={(event) => setForm({ ...form, token: event.target.value })} autoComplete="off" />
-              <p className="text-xs leading-5 text-muted">{t("tokenHint")}</p>
+            <h2 className="text-base font-semibold">{form.id ? t("updateCredentials") : t("addGateway")}</h2>
+            {admin && !form.id ? (
+              <div className="mt-4 inline-flex w-fit max-w-full flex-wrap rounded-full bg-input p-1" role="group">
+                <button type="button" className={form.kind === "newapi_admin" ? "whitespace-nowrap rounded-full bg-card px-3 py-1 text-xs font-semibold" : "whitespace-nowrap rounded-full px-3 py-1 text-xs text-secondary"} onClick={() => patch({ kind: "newapi_admin", name: "" })}>{t("kindAdmin")}</button>
+                <button type="button" className={seller ? "whitespace-nowrap rounded-full bg-card px-3 py-1 text-xs font-semibold" : "whitespace-nowrap rounded-full px-3 py-1 text-xs text-secondary"} onClick={() => patch({ kind: "newapi_seller", name: suggestSellerGatewayName(form.baseUrl) })}>{t("kindSeller")}</button>
+              </div>
+            ) : null}
+            <div className="mt-4 space-y-3 overflow-y-auto">
+              <label className="block text-sm">
+                <span className="mb-1.5 block text-secondary">{t("name")}</span>
+                <input className={fieldClass} value={form.name} onChange={(event) => patch({ name: event.target.value }, true)} />
+                {seller ? <span className="mt-1 block text-xs leading-5 text-muted">{t("nameHint")}</span> : null}
+              </label>
+              <label className="block text-sm">
+                <span className="mb-1.5 block text-secondary">{t("baseUrl")}</span>
+                <input className={fieldClass} value={form.baseUrl} onChange={(event) => patch({ baseUrl: event.target.value })} />
+              </label>
+              {seller ? (
+                <>
+                  <label className="block text-sm">
+                    <span className="mb-1.5 block text-secondary">{t("sellerUsername")}</span>
+                    <input className={fieldClass} autoComplete="off" value={form.username} onChange={(event) => patch({ username: event.target.value })} />
+                  </label>
+                  <label className="block text-sm">
+                    <span className="mb-1.5 block text-secondary">{t("sellerPassword")}</span>
+                    <span className="flex gap-2">
+                      <input className={fieldClass} type={showPassword ? "text" : "password"} autoComplete="new-password" value={form.password} onChange={(event) => patch({ password: event.target.value })} />
+                      <button type="button" className={buttonClass("secondary", "shrink-0")} onClick={() => setShowPassword((value) => !value)}>{showPassword ? t("hidePassword") : t("showPassword")}</button>
+                    </span>
+                  </label>
+                  <button type="button" className={buttonClass("secondary")} disabled={busy || !form.baseUrl || !form.username || !form.password} onClick={() => void testSeller()}>{busy ? t("testing") : t("testConnection")}</button>
+                  {probe ? <p className="text-sm text-ok">{t("loggedIn", { ms: probe.latencyMs })}</p> : <p className="text-xs leading-5 text-muted">{t("saveRequiresTest")}</p>}
+                  {probe ? (
+                    <div className="rounded-control bg-ok-soft px-3 py-3 text-sm text-ok">
+                      <span className="whitespace-nowrap rounded-full bg-card px-2 py-0.5 text-xs font-semibold">{t("renewOn")}</span>
+                      <p className="mt-2 break-words text-xs leading-5">{t("renewDetail", { time: formatShanghaiTime(probe.expiresAt, locale) })}</p>
+                    </div>
+                  ) : null}
+                </>
+              ) : (
+                <>
+                  <input className={fieldClass} placeholder={t("adminUserId")} value={form.adminUserId} onChange={(event) => patch({ adminUserId: event.target.value })} />
+                  <input className={fieldClass} placeholder={t("token")} type="password" value={form.token} onChange={(event) => patch({ token: event.target.value })} autoComplete="off" />
+                  <p className="text-xs leading-5 text-muted">{t("tokenHint")}</p>
+                </>
+              )}
             </div>
-            <div className="mt-auto flex justify-end gap-2">
-              <button type="button" className={buttonClass("secondary")} onClick={() => setAdding(false)}>{common("cancel")}</button>
-              <button type="submit" className={buttonClass("primary")} disabled={busy}>{t("addGateway")}</button>
+            <div className="mt-auto flex flex-wrap justify-end gap-2 pt-4">
+              <button type="button" className={buttonClass("secondary")} onClick={() => { setAdding(false); setProbe(null); }}>{common("cancel")}</button>
+              <button type="submit" className={buttonClass("primary")} disabled={busy || (seller && !probe)}>{form.id ? t("updateCredentials") : t("addGateway")}</button>
             </div>
           </form>
         </div>
       ) : null}
       {dirty ? (
         <div className="fixed inset-x-0 bottom-0 z-30 border-t border-line bg-card px-4 py-3 md:left-sidebar">
-          <div className="mx-auto flex max-w-[640px] items-center justify-between gap-3">
+          <div className="mx-auto flex max-w-[640px] flex-wrap items-center justify-between gap-3">
             <span className="text-sm">{t("dirty")}</span>
             <div className="flex gap-2">
               <button type="button" className={buttonClass("secondary")} onClick={() => setLimits(saved)}>{t("discard")}</button>

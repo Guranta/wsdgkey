@@ -26,6 +26,8 @@ type BillRow = {
   spanDays: number;
   backfillAt: number | null;
   gray: boolean;
+  billingMode?: string;
+  imported?: boolean;
   rebindFrom?: number | null;
   rebindTo?: number | null;
   oldSegmentStatus?: string;
@@ -40,6 +42,7 @@ type Bill = {
   unsyncedCount: number;
   totalConsumption: number;
   totalTestQuota: number;
+  showTestLine?: boolean;
   remainingBalance: number;
   usedUsd: number;
   byType: Slice[];
@@ -174,12 +177,13 @@ export function BillingView() {
     };
   }, [hydrated]);
 
-  function labelText(row: { label: string; kind?: string; spanDays: number }): string {
+  function labelText(row: { label: string; kind?: string; spanDays: number; billingMode?: string }): string {
     const raw = row.label;
     if (raw === "span2" || raw === "两日合计") return t("span2");
     if (raw === "spanN") return t("spanN", { count: row.spanDays });
     const counted = raw.match(/^(\d+)日合计$/);
     if (counted) return t("spanN", { count: Number(counted[1]) });
+    if (row.billingMode === "snapshot" && row.kind !== "amount") return t("missingData");
     if (raw === "unsynced" || raw === "未同步" || row.kind === "unsynced") return t("unsynced");
     if (raw === "noBaseline" || raw === "无基线" || row.kind === "no-baseline") return t("noBaseline");
     if (raw === "oneDay" || raw === "一日" || !raw) return t("oneDay");
@@ -281,11 +285,16 @@ export function BillingView() {
                   {rows.map((row) => (
                     <tr key={row.id} className={`border-t border-line ${row.gray ? "text-muted" : ""}`}>
                       <td className="px-4 py-3">
-                        <div className="font-medium">{row.name}</div>
+                        <div className="flex flex-wrap items-center gap-2 font-medium">
+                          <span className="break-words">{row.name}</span>
+                          {row.billingMode === "snapshot" ? <span className="whitespace-nowrap rounded-full px-2 py-0.5 text-[11px] font-medium" style={{ background: "rgba(48,176,199,0.15)", color: "#0E7490" }} title={t("snapshotTip")}>{t("snapshotTag")}</span> : null}
+                          {row.imported ? <span className="whitespace-nowrap rounded-full bg-input px-2 py-0.5 text-[11px] font-normal text-muted">{t("importedTag")}</span> : null}
+                          {row.billingMode === "snapshot" && row.kind !== "amount" ? <span className="whitespace-nowrap rounded-full bg-input px-2 py-0.5 text-[11px] text-muted">{t("missingData")}</span> : null}
+                        </div>
                         {admin ? <div className="text-xs text-muted">{row.supplier === "unknown" ? t("unknownSupplier") : row.supplier}</div> : null}
                         <div className="text-[11px] text-muted">{[row.rebindFrom && row.rebindTo ? t("rebindMarker", { from: row.rebindFrom, to: row.rebindTo }) : "", row.oldSegmentStatus === "unsynced" ? t("unsynced") : "", findingText(row.finding), labelText(row), row.backfillAt ? t("backfill", { time: formatShanghaiTime(row.backfillAt, locale) }) : ""].filter(Boolean).join(" · ")}</div>
                       </td>
-                      <td className="whitespace-nowrap px-4 py-3 tabular-nums">{cell(row.today)}</td>
+                      <td className="whitespace-nowrap px-4 py-3 tabular-nums">{row.billingMode === "snapshot" && row.kind !== "amount" ? t("missingData") : cell(row.today)}</td>
                       <td className="whitespace-nowrap px-4 py-3 tabular-nums">{cell(row.before)}</td>
                       <td className="whitespace-nowrap px-4 py-3 tabular-nums">{cell(row.cumulative)}</td>
                     </tr>
@@ -294,10 +303,12 @@ export function BillingView() {
               ))}
               {bill.rows.length ? (
                 <>
+                  {bill.showTestLine ? (
                   <tr className="border-t border-line text-muted">
                     <td className="px-4 py-3 text-xs" colSpan={3}>{t("testLine")}</td>
                     <td className="whitespace-nowrap px-4 py-3 text-xs tabular-nums">{money(bill.totalTestQuota)}</td>
                   </tr>
+                  ) : null}
                   <tr className="border-t border-line font-semibold">
                     <td className="px-4 py-3">{t("grandTotal")}</td>
                     <td className="whitespace-nowrap px-4 py-3 tabular-nums">{cell(sum(allRows, "today"))}</td>

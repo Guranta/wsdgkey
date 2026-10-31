@@ -62,7 +62,19 @@ Dockerfile                   多阶段构建，uid 1001
 | 用户管理 | `/admin/users` | 仅管理员（侧栏过滤；`/admin` 与 `/users` 在 proxy 里对供应商返回 403） | `/api/admin/users` | 不调用 New API |
 | 设置 | `/settings` | 所有人。网关和限速只渲染给管理员 | `/api/gateways`、`/api/settings`、`/api/me/password` | 保存网关时不连上游。之后的同步才用保存的令牌 |
 
-上游请求都走 `lib/upstream.ts` 的 `callGateway`。请求头是 `Authorization: Bearer <系统访问令牌>` 和 `New-Api-User: <数字用户 ID>`。
+上游请求都走 `lib/upstream.ts` 的 `callGateway`，再由 `lib/gateway-adapter.ts` 按网关种类分流。管理令牌网关的请求头是 `Authorization: Bearer <系统访问令牌>` 和 `New-Api-User: <数字用户 ID>`。供应商账号网关只送 `Authorization: Bearer <访问令牌>`，路径在 `/api/seller/channel/*`。
+
+## 供应商账号网关
+
+`gateways.kind` 为 `newapi_admin`（默认）或 `newapi_seller`。供应商账号只存站点根地址、用户名和加密后的密码（`password_cipher`，与令牌同一套 AES-256-GCM）。运行时的访问令牌、刷新 cookie、`X-Auth-Session` 也加密存放，接口和页面都不返回它们。
+
+登录是 `POST /api/user/login`。访问令牌剩余不足 60 秒时，`lib/seller-auth.ts` 用 `POST /api/user/auth/refresh` 续期，并保存旋转后的 `new_api_refresh` cookie。同一网关的续期串行执行。业务接口遇到 401 时刷新一次再重试，不把 401 交给页面。刷新失败才用密码再登录一次；每小时最多 3 次密码登录，超出后停止并记连接异常。验证码或 MFA 记为「需要人工处理」，不当成密码错误。
+
+渠道上限、`can_write`、`can_toggle` 来自列表接口的 `max_channels` 等字段，每次拉列表都更新。`max_channels` 为 0 表示站点没有设上限。添加渠道前会再读一次列表，超出上限时一条都不提交。
+
+已有渠道用「导入已有渠道」按列表逐条写入本地，不调用站点的修改接口。重复导入跳过已有记录。导入渠道的 `origin = imported`，创建人是连接这个网关的账号。账单从导入之后的第一次 0 点快照起算，不补导入前的消耗。
+
+供应商账号的账单不读 `/api/log/stat`。0 点后 15 分钟内用列表里的 `used_quota` 作快照；更晚的累计值不拿来猜 0 点。当日消耗是相邻两次快照的差。缺快照的日子是「缺数据」，不是 0，也不把前后两天合成一段。测试不从 `used_quota` 里扣。对账页选中这种网关时展示最近 7 天的快照差，不显示一致、差额或日志缺失。管理令牌网关仍走原来的日志对账，并且不会把供应商账号的渠道算进那份核对。
 
 ## 网关限流队列
 
