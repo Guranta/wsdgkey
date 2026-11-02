@@ -143,6 +143,7 @@ export function ChannelDrawer({
   gatewayId,
   editing,
   busy,
+  seller = false,
   onClose,
   onSave,
   onTest,
@@ -150,8 +151,9 @@ export function ChannelDrawer({
   gatewayId: string;
   editing: DrawerChannel | null;
   busy: boolean;
+  seller?: boolean;
   onClose: () => void;
-  onSave: (body: Record<string, unknown>) => Promise<void>;
+  onSave: (body: Record<string, unknown>) => Promise<string | void>;
   onTest: (id: string, model: string) => Promise<void>;
 }) {
   const t = useTranslations("drawer");
@@ -176,6 +178,7 @@ export function ChannelDrawer({
   const [customGroup, setCustomGroup] = useState("");
   const [mappingRaw, setMappingRaw] = useState(() => editing !== null && !isFlatStringMap(editing.modelMapping));
   const [pairs, setPairs] = useState<MapPair[]>(() => parseMapping(editing?.modelMapping ?? ""));
+  const [baseUrlError, setBaseUrlError] = useState("");
 
   const keys = splitKeys(form.key);
   const jsonKey = form.type === 57 || (form.type === 41 && (form.vertex_key_type || "json") === "json");
@@ -197,8 +200,8 @@ export function ChannelDrawer({
   const typeMeta = channelTypeOption(form.type);
   const typeChoices = useMemo(() => {
     const query = typeQuery.trim().toLowerCase();
-    return CHANNEL_TYPE_OPTIONS.filter((item) => !query || item.name.toLowerCase().includes(query) || String(item.id).includes(query));
-  }, [typeQuery]);
+    return CHANNEL_TYPE_OPTIONS.filter((item) => (seller ? item.id !== 58 : true) && (!query || item.name.toLowerCase().includes(query) || String(item.id).includes(query)));
+  }, [typeQuery, seller]);
 
   useEffect(() => {
     const lines = splitKeys(form.key);
@@ -378,12 +381,18 @@ export function ChannelDrawer({
             return;
           }
           setFieldError("");
-          void onSave(payload);
+          void onSave(payload).then((siteError) => {
+            if (siteError) {
+              setBaseUrlError(siteError);
+              setTab("connection");
+            }
+          });
         }}
       >
         <div className="border-b border-line px-5 py-4">
           <h2 id="channel-drawer-title" className="text-lg font-semibold">{editing ? t("editTitle", { name: editing.name }) : t("addTitle")}</h2>
           <p className="mt-1 text-xs text-muted">{t("parity")}</p>
+          {seller ? <p className="mt-3 rounded-control bg-input px-3 py-2 text-xs leading-5 text-secondary">{t("sellerNote")}</p> : null}
           <div className="mt-3 flex flex-wrap gap-1 rounded-full bg-input p-1" role="tablist" aria-label={t("tabsLabel")}>
             {(["connection", "routing", "request", "other"] as const).map((item) => (
               <button
@@ -512,7 +521,7 @@ export function ChannelDrawer({
                   )}
                 </Field>
               ) : null}
-              {form.type === 57 ? (
+              {form.type === 57 && !seller ? (
                 <div className="rounded-control border border-warn/40 bg-warn-soft p-3 text-xs text-warn">
                   <p>{t("codexDisclaimer")}</p>
                   {editing ? (
@@ -529,8 +538,10 @@ export function ChannelDrawer({
                 </Field>
               ) : null}
               {form.type !== 45 ? (
-                <Field label={t("baseUrl")} hint={urlWarning ?? undefined}>
-                  <input className={fieldClass} value={form.base_url} placeholder="https://api.openai.com" onChange={(event) => patch({ base_url: event.target.value })} />
+                <Field label={t("baseUrl")} hint={seller ? undefined : urlWarning ?? undefined}>
+                  <input className={`${fieldClass} ${baseUrlError ? "border-danger" : ""}`} value={form.base_url} placeholder="https://api.openai.com" onChange={(event) => { setBaseUrlError(""); patch({ base_url: event.target.value }); }} />
+                  {seller ? <span className="mt-1 block text-xs leading-5 text-muted">{t("baseUrlSellerHint")}</span> : null}
+                  {baseUrlError ? <span className="mt-1 block break-words font-mono text-xs leading-5 text-danger">{t("siteReturned", { message: baseUrlError })}</span> : null}
                 </Field>
               ) : urlWarning ? <p className="text-xs text-warn">{urlWarning}</p> : null}
               <Field label={t("models")}>
@@ -677,6 +688,7 @@ export function ChannelDrawer({
               ))}
               {duplicateLines.length ? <p className="text-xs text-warn">{t("duplicateInput", { lines: duplicateLines.join(", ") })}</p> : null}
               {existingDupes > 0 ? <p className="text-xs text-warn">{t("duplicateExisting", { count: existingDupes })}</p> : null}
+              {seller ? null : (
               <Field label={t("addMode")}>
                 <select className={fieldClass} value={form.multi_key_mode} onChange={(event) => patch({ multi_key_mode: event.target.value as ChannelFormValues["multi_key_mode"] })}>
                   <option value="single">{t("modeSingle")}</option>
@@ -684,6 +696,7 @@ export function ChannelDrawer({
                   <option value="multi_to_single">{t("modeMulti")}</option>
                 </select>
               </Field>
+              )}
             </>
           ) : null}
           {tab === "routing" ? (
@@ -691,10 +704,12 @@ export function ChannelDrawer({
               <Field label={t("testModel")}>
                 <input className={fieldClass} value={form.test_model} placeholder={t("testModelPlaceholder")} onChange={(event) => patch({ test_model: event.target.value })} />
               </Field>
+              {seller ? null : (
               <label className="flex items-center gap-2 text-sm">
                 <input type="checkbox" checked={form.auto_ban !== 0} onChange={(event) => patch({ auto_ban: event.target.checked ? 1 : 0 })} />
                 {t("autoBan")}
               </label>
+              )}
               <Field label={t("modelMapping")}>
                 {mappingRaw ? (
                   <>
@@ -734,6 +749,8 @@ export function ChannelDrawer({
           ) : null}
           {tab === "request" ? (
             <>
+              {seller ? null : (
+              <>
               <Field label={t("statusMapping")}>
                 <textarea className={`${fieldClass} h-20 py-2 font-mono`} value={form.status_code_mapping} placeholder='{"429":"500"}' onChange={(event) => patch({ status_code_mapping: event.target.value })} />
               </Field>
@@ -743,6 +760,8 @@ export function ChannelDrawer({
               <Field label={t("headerOverride")}>
                 <textarea className={`${fieldClass} h-20 py-2 font-mono`} value={form.header_override} placeholder="{}" onChange={(event) => patch({ header_override: event.target.value })} />
               </Field>
+              </>
+              )}
               <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={Boolean(form.force_format)} onChange={(event) => patch({ force_format: event.target.checked })} />{t("forceFormat")}</label>
               <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={Boolean(form.thinking_to_content)} onChange={(event) => patch({ thinking_to_content: event.target.checked })} />{t("thinking")}</label>
               <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={Boolean(form.pass_through_body_enabled)} onChange={(event) => patch({ pass_through_body_enabled: event.target.checked })} />{t("passThrough")}</label>
@@ -763,9 +782,11 @@ export function ChannelDrawer({
           ) : null}
           {tab === "other" ? (
             <>
+              {seller ? null : (
               <Field label={t("tag")}>
                 <input className={fieldClass} value={form.tag} onChange={(event) => patch({ tag: event.target.value })} />
               </Field>
+              )}
               <Field label={t("remark")}>
                 <input className={fieldClass} value={form.remark} onChange={(event) => patch({ remark: event.target.value })} />
               </Field>

@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>万事大吉 v2.1 — 线框</title>
+<title>万事大吉 v2.2 — 线框</title>
 <link rel="icon" type="image/svg+xml" href="logo-mark.svg" />
 <style>
   :root {
@@ -778,6 +778,21 @@
     .lf-body, .login-face.shake .lf-svg, .login-face.hop .lf-svg { animation: none; }
     .lf-look, .lf-open, .lf-shut, .lf-happy { transition: none; }
   }
+  /* ===== v2.2 供应商账号网关 ===== */
+  .seller-only { display: none !important; }
+  .app.gw-seller .seller-only { display: revert !important; }
+  .app.gw-seller .seller-hide, .drawer.gw-seller .seller-hide { display: none !important; }
+  .drawer.gw-seller .seller-only { display: block !important; }
+  .drawer.gw-seller .std-only { display: none !important; }
+  .seller-note { margin: 0 0 12px; padding: 8px 12px; border-radius: 10px; background: var(--input-fill); color: var(--text-secondary); font-size: 12px; }
+  .site-err { margin: 6px 0 0; font-size: 12px; color: #D92D20; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; }
+  .pill-snap { background: rgba(48,176,199,.14); color: #1E8197; margin-left: 4px; }
+  .pill-imp { background: var(--input-fill); color: var(--text-muted); margin-left: 4px; font-weight: 600; }
+  .renew-banner { margin-bottom: 12px; }
+  .renew-box { font-size: 12px; padding: 8px 12px; border-radius: 10px; background: var(--bg-page); margin-bottom: 14px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  #gwDrawer:not(.k-seller) .gwk-seller, #gwDrawer.k-seller .gwk-std { display: none; }
+  .snap-table td.miss { color: var(--text-muted); background: repeating-linear-gradient(135deg, transparent 0 6px, rgba(0,0,0,.03) 6px 12px); }
+  .gw-kind { font-size: 11px; color: var(--text-muted); border: 1px solid var(--border); border-radius: 999px; padding: 1px 8px; margin-left: 6px; }
 </style>
 </head>
 <body>
@@ -903,18 +918,24 @@
           <div class="header-actions">
             <div class="input-wrap gw-select" title="网关">
               <span class="unit">网关</span>
-              <select id="gwSelect" onchange="toast('已切换网关（演示）');reloadPage()">
-                <option>gw-demo-1 · gw1.example.com</option>
-                <option>gw-demo-2 · gw2.example.com</option>
+              <select id="gwSelect" onchange="setGwKind(this.value)">
+                <option value="std">gw-demo-1 · gw1.example.com</option>
+                <option value="std2">gw-demo-2 · gw2.example.com</option>
+                <option value="seller">ainow-seller · ainow.example.com（供应商账号）</option>
               </select>
             </div>
-            <button class="btn btn-primary" type="button" onclick="openDrawer()">添加渠道</button>
+            <button class="btn btn-secondary seller-only" type="button" onclick="runImport()">导入已有渠道</button>
+            <span id="addWrap"><button class="btn btn-primary" id="addBtn" type="button" onclick="openDrawer()">添加渠道</button></span>
           </div>
         </div>
 
+        <div class="banner banner-warn renew-banner" id="renewBannerCh" style="display:none"><b>供应商账号令牌自动续期失败</b> · ainow-seller 最近一次续期 10-31 11:40 失败（站点返回：账号或密码错误），当前令牌将于 10-31 13:40 过期。请到 设置 › 网关 重新填写账号密码并测试连接。</div>
         <div class="demo-bar">
           <strong>线框演示</strong>
           <button class="btn btn-secondary btn-xs" type="button" onclick="openDrawer()">抽屉</button>
+          <button class="btn btn-secondary btn-xs" type="button" onclick="setGwKind('seller')">供应商账号网关</button>
+          <button class="btn btn-secondary btn-xs seller-only" type="button" onclick="setSellerLimit(!SELLER_FULL)">站点上限</button>
+          <button class="btn btn-secondary btn-xs seller-only" type="button" onclick="setRenewFail(!RENEW_FAIL)">续期失败</button>
           <button class="btn btn-secondary btn-xs" type="button" onclick="askToggle(currentRows()[0] && currentRows()[0].id)">确认弹窗</button>
           <button class="btn btn-secondary btn-xs" type="button" onclick="demoBatchResult()">批量结果</button>
           <button class="btn btn-secondary btn-xs" type="button" onclick="reloadPage()">加载态</button>
@@ -1067,9 +1088,20 @@
             <p class="page-sub scope-note">仅统计通过上号器添加的渠道</p>
           </div>
           <div class="header-actions">
-            <span class="pp pp-ok">已核对 2026-10-19 03:47</span>
+            <div class="input-wrap gw-select" title="网关"><span class="unit">网关</span>
+              <select id="reconGw" onchange="setReconGw(this.value)"><option value="std">gw-demo-1 · gw1.example.com</option><option value="seller">ainow-seller · ainow.example.com（供应商账号）</option></select></div>
+            <span class="pp pp-ok" id="reconDone">已核对 2026-10-19 03:47</span>
           </div>
         </div>
+        <div id="reconSeller" style="display:none">
+          <div class="card">
+            <div class="card-title"><span>ainow-seller 账单 <span class="pill pill-snap">快照计费</span></span><small>每个渠道 = 当日 0:00 快照 used_quota − 前一日 0:00 快照 used_quota</small></div>
+            <div class="table-wrap"><table class="recon-table snap-table">
+              <thead id="snapHead"></thead><tbody id="snapBody"></tbody></table></div>
+            <p class="muted" style="font-size:12px;margin-top:10px">某天缺 0:00 快照时显示「缺数据」：不记 0，也不按平均值补。导入的渠道从导入后的第一个 0:00 快照开始计费，之前显示「—」。</p>
+          </div>
+        </div>
+        <div id="reconOrig">
         <div class="card recon-top">
           <div class="donut-wrap" id="dRecon"></div>
           <div class="recon-facts">
@@ -1133,6 +1165,7 @@
             <p class="legend-note" id="supNote"></p>
           </div>
         </div>
+      </div>
       </section>
 
       <!-- ============ 用户管理 ============ -->
@@ -1186,6 +1219,7 @@
             <p class="sec-sub">仅管理员</p>
             <div class="field"><label>站点名称</label><div class="input-wrap"><input class="dirty-track" value="万事大吉" oninput="document.getElementById('siteBrand').textContent=this.value" /></div></div>
           </div>
+          <div class="banner banner-warn" id="renewBannerSet" style="display:none"><b>供应商账号令牌自动续期失败</b> · ainow-seller：10-31 11:40 续期失败（站点返回：账号或密码错误），令牌 10-31 13:40 过期。请编辑该网关，重新填写账号密码并测试连接。</div>
           <div class="card admin-only-block" id="secGw">
             <div class="row-between" style="margin-bottom:4px">
               <div><div class="sec-title">网关</div><p class="sec-sub" style="margin-bottom:0">上号器连接的 New API 网关；渠道的增删改与拉取都通过管理令牌执行</p></div>
@@ -1257,6 +1291,7 @@
   </div>
   <div class="drawer-body">
     <!-- 连接与模型 -->
+    <div class="seller-note seller-only">此网关为供应商账号，部分字段不可设置</div>
     <div class="dpanel active" data-p="connection">
       <section class="dsec">
         <div class="dsec-h"><b>基本信息</b><span>名称、供应商类型和可用状态。</span></div>
@@ -1304,8 +1339,10 @@
         <div class="field" data-hide="3,8,22,36,45">
           <label>API 地址 <i class="req" data-show="61,62,63">*</i></label>
           <div class="input-wrap" id="dUrlWrap"><input id="dUrl" placeholder="https://api.anthropic.com" oninput="validateUrl()" onblur="validateUrl()" /></div>
-          <p class="field-hint">自定义 API 基础 URL。对于官方渠道，New API 具有内置地址。仅针对第三方代理站点或特殊端点填写此项。请勿添加 /v1 或尾部斜杠。</p>
+          <p class="field-hint std-only">自定义 API 基础 URL。对于官方渠道，New API 具有内置地址。仅针对第三方代理站点或特殊端点填写此项。请勿添加 /v1 或尾部斜杠。</p>
+          <p class="field-hint seller-only">仅限站点允许的地址</p>
           <p class="field-warn" id="dUrlErr"></p>
+          <p class="site-err" id="dUrlSiteErr" style="display:none"></p>
         </div>
         <div class="field" data-show="58"><label>高级自定义路由</label><div class="ta-wrap"><textarea class="mono-ta" rows="3" placeholder="JSON"></textarea></div></div>
 
@@ -1316,7 +1353,7 @@
             <label>添加模式</label>
             <div class="seg seg-field" id="addMode">
               <button type="button" data-m="single" onclick="setAddMode('single')">单密钥</button>
-              <button type="button" data-m="batch" class="active" onclick="setAddMode('batch')">批量添加（每行一个密钥）</button>
+              <button type="button" data-m="batch" class="active seller-hide" onclick="setAddMode('batch')">批量添加（每行一个密钥）</button>
               <button type="button" data-m="multi_to_single" onclick="setAddMode('multi_to_single')">多密钥模式（多个密钥，一个渠道）</button>
             </div>
           </div>
@@ -1350,7 +1387,7 @@
           <p class="field-error" id="dModelErr">请至少添加一个模型</p>
           <div class="row-gap" style="margin-top:8px">
             <button class="btn btn-secondary btn-xs" type="button" onclick="fillModels()">填入相关模型</button>
-            <button class="btn btn-secondary btn-xs" type="button" onclick="toast('从上游获取（演示，不发请求）')">从上游获取</button>
+            <button class="btn btn-secondary btn-xs seller-hide" type="button" onclick="toast('从上游获取（演示，不发请求）')">从上游获取</button>
             <button class="btn btn-ghost btn-xs" type="button" onclick="toast('已复制到剪贴板')">全部复制</button>
             <button class="btn btn-ghost btn-xs text-danger" type="button" onclick="MODELS=[];renderModels()">清除全部</button>
           </div>
@@ -1370,12 +1407,12 @@
       </section>
       <section class="dsec">
         <div class="dsec-h"><b>路由策略</b></div>
-        <div class="num-row num-row-2">
+        <div class="num-row num-row-2 seller-hide">
           <div class="field"><label>优先级</label><div class="input-wrap"><input type="number" value="0" /></div><p class="field-hint">优先级更高的渠道优先被选中</p></div>
           <div class="field"><label>权重</label><div class="input-wrap"><input type="number" value="0" /></div><p class="field-hint">用于负载均衡。权重越高 = 请求越多</p></div>
         </div>
         <div class="field"><label>测试模型</label><div class="input-wrap"><input placeholder="测试渠道连接时使用的模型" /></div><p class="field-hint">测试渠道连接时使用的模型</p></div>
-        <div class="field row-between"><div><label style="margin:0">自动封禁</label><p class="field-hint" style="margin-top:2px">重复失败时自动禁用渠道</p></div><button class="switch on" type="button" role="switch" aria-checked="true" onclick="this.classList.toggle('on')"></button></div>
+        <div class="field row-between seller-hide"><div><label style="margin:0">自动封禁</label><p class="field-hint" style="margin-top:2px">重复失败时自动禁用渠道</p></div><button class="switch on" type="button" role="switch" aria-checked="true" onclick="this.classList.toggle('on')"></button></div>
       </section>
     </div>
 
@@ -1383,9 +1420,9 @@
     <div class="dpanel" data-p="request">
       <section class="dsec">
         <div class="dsec-h"><b>覆盖规则</b></div>
-        <div class="field"><label>状态码映射</label><div class="ta-wrap" id="dScWrap"><textarea id="dSc" class="mono-ta" rows="2" placeholder='{"400": "500"}' oninput="validateJson('dSc')"></textarea></div><p class="field-hint">将上游状态码映射到不同的代码</p><p class="field-warn" id="dScErr">JSON 格式可能不对，仍可保存</p></div>
-        <div class="field"><label>参数覆盖</label><div class="ta-wrap"><textarea class="mono-ta" rows="2" placeholder='{"temperature": 0.7}'></textarea></div><p class="field-hint">覆盖请求参数。无法覆盖 stream 参数。</p></div>
-        <div class="field"><label>请求头覆盖</label><div class="ta-wrap"><textarea class="mono-ta" rows="2" placeholder='{"X-Custom-Header": "value"}'></textarea></div><p class="field-hint">覆盖请求头（JSON 格式）</p></div>
+        <div class="field seller-hide"><label>状态码映射</label><div class="ta-wrap" id="dScWrap"><textarea id="dSc" class="mono-ta" rows="2" placeholder='{"400": "500"}' oninput="validateJson('dSc')"></textarea></div><p class="field-hint">将上游状态码映射到不同的代码</p><p class="field-warn" id="dScErr">JSON 格式可能不对，仍可保存</p></div>
+        <div class="field seller-hide"><label>参数覆盖</label><div class="ta-wrap"><textarea class="mono-ta" rows="2" placeholder='{"temperature": 0.7}'></textarea></div><p class="field-hint">覆盖请求参数。无法覆盖 stream 参数。</p></div>
+        <div class="field seller-hide"><label>请求头覆盖</label><div class="ta-wrap"><textarea class="mono-ta" rows="2" placeholder='{"X-Custom-Header": "value"}'></textarea></div><p class="field-hint">覆盖请求头（JSON 格式）</p></div>
       </section>
       <section class="dsec">
         <div class="dsec-h"><b>请求处理</b></div>
@@ -1429,7 +1466,7 @@
       </section>
       <section class="dsec">
         <div class="dsec-h"><b>内部备注</b></div>
-        <div class="field"><label>标签</label><div class="input-wrap"><input placeholder="用于分组渠道的可选标签" /></div></div>
+        <div class="field seller-hide"><label>标签</label><div class="input-wrap"><input placeholder="用于分组渠道的可选标签" /></div></div>
         <div class="field"><label>备注</label><div class="ta-wrap"><textarea rows="2" placeholder="关于此渠道的可选备注"></textarea></div></div>
       </section>
     </div>
@@ -1447,16 +1484,22 @@
 <aside class="drawer drawer-sm" id="gwDrawer" role="dialog" aria-modal="true" aria-labelledby="gwTitle">
   <div class="drawer-head"><h3 id="gwTitle">添加网关</h3><button class="drawer-close" type="button" onclick="closeGwDrawer()" aria-label="关闭">×</button></div>
   <div class="drawer-body">
-    <div class="field"><label>名称 <i class="req">*</i></label><div class="input-wrap"><input id="gwName" placeholder="例如 gw-demo-3" /></div></div>
-    <div class="field"><label>站点地址 <i class="req">*</i></label><div class="input-wrap" id="gwUrlWrap"><input id="gwUrl" placeholder="https://gw3.example.com" oninput="gwUrlCheck()" /></div>
-      <p class="field-hint">New API 站点根地址，结尾不要带 /v1</p><p class="field-warn" id="gwUrlWarn">结尾带了 /v1，建议去掉（仍可保存）</p></div>
-    <div class="field"><label>管理令牌 <i class="req">*</i></label><div class="input-wrap"><input type="password" id="gwTok" placeholder="系统访问令牌" autocomplete="off" /><button type="button" class="toggle-eye" onclick="toggleMask('gwTok', this)">显示</button></div>
+    <div class="field"><label>类型 <i class="req">*</i></label><div class="seg seg-field" id="gwKindSeg"><button type="button" data-k="std" class="active" onclick="setGwFormKind('std')">New API（管理令牌）</button><button type="button" data-k="seller" onclick="setGwFormKind('seller')">供应商账号</button></div>
+      <p class="field-hint gwk-seller">用供应商账号登录站点（改版 New API，提供 /api/seller/channel/* 接口），只能管理该账号自己的渠道</p></div>
+    <div class="field"><label>名称 <i class="req">*</i></label><div class="input-wrap"><input id="gwName" placeholder="例如 gw-demo-3" /></div><p class="field-hint gwk-seller">默认按站点 + 账号自动生成，可修改</p></div>
+    <div class="field"><label>站点地址 <i class="req">*</i></label><div class="input-wrap" id="gwUrlWrap"><input id="gwUrl" placeholder="https://gw3.example.com" oninput="gwUrlCheck();gwFormChanged()" /></div>
+      <p class="field-hint">站点根地址，结尾不要带 /v1</p><p class="field-warn" id="gwUrlWarn">结尾带了 /v1，建议去掉（仍可保存）</p></div>
+    <div class="field gwk-seller"><label>账号 <i class="req">*</i></label><div class="input-wrap"><input id="gwAcct" placeholder="供应商账号" autocomplete="off" oninput="gwFormChanged()" /></div></div>
+    <div class="field gwk-seller"><label>密码 <i class="req">*</i></label><div class="input-wrap"><input type="password" id="gwPwd" placeholder="账号密码" autocomplete="new-password" oninput="gwFormChanged()" /><button type="button" class="toggle-eye" onclick="toggleMask('gwPwd', this)">显示</button></div>
+      <p class="field-hint">只用于登录站点换取令牌并自动续期；保存后不再显示，也不会回传到前端</p></div>
+    <div class="renew-box gwk-seller" id="gwRenew"><span class="muted">令牌自动续期：测试连接成功后开启</span></div>
+    <div class="field gwk-std"><label>管理令牌 <i class="req">*</i></label><div class="input-wrap"><input type="password" id="gwTok" placeholder="系统访问令牌" autocomplete="off" /><button type="button" class="toggle-eye" onclick="toggleMask('gwTok', this)">显示</button></div>
       <p class="field-hint">New API「个人设置 › 系统访问令牌」，需管理员权限；保存后仅显示末 4 位</p></div>
   </div>
   <div class="drawer-foot">
     <span class="foot-note" id="gwFoot"></span>
     <button class="btn btn-secondary" type="button" onclick="gwTest()">测试连接</button>
-    <button class="btn btn-primary" type="button" onclick="gwSave()">保存</button>
+    <button class="btn btn-primary" type="button" id="gwSaveBtn" onclick="gwSave()">保存</button>
   </div>
 </aside>
 
@@ -1469,6 +1512,19 @@
     <div class="modal-actions">
       <button class="btn btn-secondary" type="button" id="cfCancel" onclick="closeModals()">取消</button>
       <button class="btn btn-danger" type="button" id="cfOk">确认</button>
+    </div>
+  </div>
+</div>
+<div class="modal-backdrop" id="modalImport">
+  <div class="modal" style="max-width:560px" role="dialog" aria-modal="true" aria-labelledby="imTitle">
+    <h3 id="imTitle">导入已有渠道完成</h3>
+    <p class="modal-sub">ainow-seller · 读取站点上该供应商账号下的全部渠道；已导入过的自动跳过，可重复执行</p>
+    <div class="result-sum" id="imSum"></div>
+    <div class="result-list" id="imList"></div>
+    <p class="muted" style="font-size:12px;margin:10px 0 0">导入只登记归属，不修改任何渠道的设置或状态（包括已自动禁用的渠道）。计费从导入后的第一个 0:00 快照开始。</p>
+    <div class="modal-actions">
+      <button class="btn btn-secondary" type="button" onclick="closeModals();runImport()">再次导入</button>
+      <button class="btn btn-primary" type="button" onclick="closeModals()">完成</button>
     </div>
   </div>
 </div>
@@ -1549,11 +1605,11 @@
 
 <div class="tip" id="tip"></div>
 <div class="toast" id="toast"></div>
-<div class="wireframe-tag">万事大吉 v2.1 · 线框 · 虚构数据</div>
+<div class="wireframe-tag">万事大吉 v2.2 · 线框 · 虚构数据</div>
 
 <script>
 /* ===== i18n（线框实现：短语表 + DOM 文本替换；正式实现见 DESIGN.md §14 用 key） ===== */
-const I18N_EN = {"供应商":"Supplier","管理员":"Admin","登录":"Login","用户名":"Username","请输入用户名":"Please enter your username","密码":"Password","显示":"Show","请输入密码":"Please enter your password","设置":"Settings","渠道管理":"Channels","网关":"Gateway","运行中":"Running","正常":"OK","失败":"Failed","搜索":"Search","分组":"Group","全部":"All","重置":"Reset","手动禁用":"Manually disabled","自动禁用":"Auto-disabled","名称":"Name","类型":"Type","成功率":"Success rate","余额":"Balance","状态":"Status","自动":"Auto","禁用":"Disable","创建时间":"Created","测试":"Test","未测试":"Not tested","启用":"Enable","上一页":"Previous page","下一页":"Next page","已发布":"Published","加载中":"Loading","空":"Empty","总消耗":"Total usage","剩余额度":"Remaining quota","剩余":"Remaining","已用":"Used","新建":"New","渠道":"Channel","操作":"Actions","备注":"Remark","确认":"Confirm","待确认":"Pending","创建供应商":"Create supplier","角色":"Role","最后登录":"Last Login","重置密码":"Reset password","已禁用":"Disabled","当前密码":"Current Password","新密码":"New password","测试连接":"Test Connection","编辑":"Edit","保存更改":"Save changes","创建渠道":"Create Channel","配置连接和模型后创建渠道。":"Configure the connection and models, then create the channel.","当前：":"Current:","阿里百炼":"Ali","火山方舟":"VolcEngine","智谱GLM":"Zhipu GLM","腾讯":"Tencent","高级自定义":"Advanced Custom","任务插件":"Task Plugin","百度":"Baidu","百度 V2":"Baidu V2","讯飞":"Xunfei","自定义":"Custom","智谱":"Zhipu","更换提供商":"Change provider","关闭":"Close","连接与模型":"Connection & Models","路由与映射":"Routing & Mapping","请求与响应":"Request & Response","其他设置":"Other Settings","基本信息":"Basic Information","名称、供应商类型和可用状态。":"Name, provider type, and availability.","例如，OpenAI GPT-4 生产环境":"e.g., OpenAI GPT-4 Production","请输入名称":"Please enter a name","已启用":"Enabled","启用或禁用此渠道":"Enable or disable this channel","OpenAI 组织":"OpenAI Organization","API 访问":"API Access","例如，https://docs-test-001.openai.azure.com":"e.g., https://docs-test-001.openai.azure.com","您的 Azure OpenAI 端点 URL":"Your Azure OpenAI endpoint URL","默认 API 版本":"Default API Version","例如，2025-04-01-preview":"e.g., 2025-04-01-preview","此渠道的默认 API 版本":"Default API version for this channel","响应 API 版本":"Responses API Version","例如，preview":"e.g., preview","默认响应 API 版本，如果为空，将使用上面的 API 版本":"Default Responses API version, if empty, will use the API version above","例如，https://api.openai.com/v1/chat/completions":"e.g., https://api.openai.com/v1/chat/completions","模型版本":"Model Version","例如，v2.1":"e.g., v2.1","Spark 模型版本，例如 v2.1（API URL 中的版本号）":"Spark model version, e.g., v2.1 (version number in API URL)","企业账户":"Enterprise Account","如果这是具有特殊响应格式的 OpenRouter 企业账户，则启用":"Enable if this is an OpenRouter enterprise account with special response format","AWS 接口":"AWS API","InvokeModel（旧接口）":"InvokeModel (legacy)","AWS 密钥格式":"AWS Key Format","API 密钥":"API Key","AK/SK 模式：使用 AccessKey|SecretAccessKey|Region":"AK/SK mode: use AccessKey|SecretAccessKey|Region","私有部署 URL":"Private Deployment URL","对于私有部署，格式为：https://fastgpt.run/api/openapi":"For private deployments, format: https://fastgpt.run/api/openapi","API 基础 URL (重要：非聊天 API)":"API Base URL (Important: Not Chat API)","例如，https://api.example.com (在 /suno 之前的路径)":"e.g., https://api.example.com (path before /suno)","账户 ID":"Account ID","例如，d6b5da8hk1awo8nap34ube6gh":"e.g., d6b5da8hk1awo8nap34ube6gh","您的 Cloudflare 账户 ID":"Your Cloudflare Account ID","Vertex AI 密钥格式":"Vertex AI Key Format","JSON 格式支持服务账户 JSON 文件":"JSON format supports service account JSON files","Vertex AI 项目 ID":"Vertex AI Project ID","例如 my-project-123":"e.g., my-project-123","服务账号 JSON 文件":"Service account JSON file(s)","部署区域":"Deployment Region","例如，us-central1 或模型特定区域的 JSON 格式":"e.g., us-central1 or JSON format for model-specific regions","API 基础 URL":"API Base URL","选择 API 终端节点区域":"Select the API endpoint region","代理 ID":"Agent ID","例如，7342866812345":"e.g., 7342866812345","输入 Coze 代理 ID":"Enter the Coze agent ID","API 地址":"API Address","自定义 API 基础 URL。对于官方渠道，New API 具有内置地址。仅针对第三方代理站点或特殊端点填写此项。请勿添加 /v1 或尾部斜杠。":"Custom API base URL. For official channels, New API has built-in addresses. Only fill this for third-party proxy sites or special endpoints. Do not add /v1 or trailing slash.","高级自定义路由":"Advanced Custom Routes","凭证":"Credentials","身份验证":"Authentication","添加模式":"Add Mode","单密钥":"Single Key","批量添加（每行一个密钥）":"Batch Add (one key per line)","多密钥模式（多个密钥，一个渠道）":"Multi-Key Mode (multiple keys, one channel)","移除重复项":"Remove Duplicates","每行输入一个 API 密钥进行批量创建":"Enter one API key per line for batch creation","多密钥策略":"Multi-Key Strategy","随机":"Random","轮询":"Polling","每次请求从池中随机选择一个密钥":"Randomly select a key from the pool for each request","密钥更新模式":"Key Update Mode","追加到现有密钥":"Append to existing keys","替换所有现有密钥":"Replace all existing keys","追加模式：新键将添加到现有键列表的末尾":"Append mode: New keys will be added to the end of the existing key list","模型与分组":"Models & Groups","已发布的模型、分组和模型重映射规则。":"Published models, groups, and model remapping rules.","上游任务插件":"Upstream task plugins","选择上游网关已安装的任务插件":"Select the task plugins installed on the upstream gateway","模型":"Models","设置模型重定向":"Set up model redirects","选择模型或添加自定义模型":"Select models or add custom ones","填入相关模型":"Fill Related Models","从上游获取":"Fetch from Upstream","全部复制":"Copy All","清除全部":"Clear all","请选择可以访问此渠道的用户组。":"Please Select user groups that can access this channel.","模型映射":"Model Mapping","路由策略":"Routing Strategy","优先级":"Priority","优先级更高的渠道优先被选中":"Higher priority channels are selected first","权重":"Weight","用于负载均衡。权重越高 = 请求越多":"Used for load balancing. Higher weight = more requests","测试模型":"Test Model","测试渠道连接时使用的模型":"Model to use when testing channel connectivity","自动封禁":"Auto Ban","重复失败时自动禁用渠道":"Automatically disable channel on repeated failures","覆盖规则":"Override Rules","状态码映射":"Status Code Mapping","将上游状态码映射到不同的代码":"Map upstream status codes to different codes","参数覆盖":"Parameter Override","覆盖请求参数。无法覆盖 stream 参数。":"Override request parameters. Cannot override stream parameter.","请求头覆盖":"Request Header Override","覆盖请求头（JSON 格式）":"Override request headers (JSON format)","请求处理":"Request processing","强制格式化":"Force Format","强制将响应格式化为 OpenAI 标准（仅限 OpenAI 渠道）":"Force format response to OpenAI standard (OpenAI channel only)","使用 Ollama 的 OpenAI 兼容对话接口":"Use OpenAI-compatible Ollama chat API","思维到内容":"Thinking to Content","将 reasoning_content 转换为 content 中的 <think> 标签":"Convert reasoning_content to <think> tag in content","透传请求体":"Pass Through Body","系统提示词":"System Prompt","输入系统提示词（用户提示词优先）":"Enter system prompt (user prompt takes priority)","系统提示词连接":"System Prompt Concatenation","将渠道系统提示与用户的提示连接起来":"Concatenate channel system prompt with user&apos;s prompt","字段透传控制":"Field passthrough controls","允许透传 service_tier":"Allow service_tier passthrough","禁止透传 store":"Disable store passthrough","允许透传 safety_identifier":"Allow safety_identifier passthrough","允许 include 用量混淆透传":"Allow include usage obfuscation passthrough","允许 inference_geo 透传":"Allow inference_geo passthrough","允许 speed 透传":"Allow speed passthrough","允许 Claude beta 查询透传":"Allow Claude beta query passthrough","渠道额外设置":"Channel Extra Settings","跳过异步任务轮询延迟":"Skip async task polling delay","该渠道轮询异步任务时不等待一秒":"Do not wait one second between polling async tasks for this channel","代理地址":"Proxy Address","此渠道的网络代理（支持 HTTP、HTTPS、SOCKS5 和 SOCKS5H）":"Network proxy for this channel (supports HTTP, HTTPS, SOCKS5, and SOCKS5H)","HTTP 协议":"HTTP Protocol","HTTP/2 连接分片":"HTTP/2 Connection Shards","忽略上游证书校验":"Skip Upstream TLS Verification","检测上游模型设置":"Upstream Model Detection Settings","上游模型更新检查":"Upstream Model Update Check","自动同步上游模型":"Auto Sync Upstream Models","已忽略上游模型":"Ignored upstream models","内部备注":"Internal Notes","标签":"Tag","用于分组渠道的可选标签":"Optional tag for grouping channels","关于此渠道的可选备注":"Optional notes about this channel","取消":"Cancel","保存":"Save","发送":"Send","其他":"Other","API 密钥（批量模式下每行一个）":"API Key (one per line for batch mode)","成功":"Success","结果":"Result","原因":"Reason","项":"items","共":"Total","个":"","退出":"Sign out","账单":"Billing","对账":"Reconcile","抽屉":"Drawer","空态":"Empty state","异常":"Anomaly","排队":"Queued","降频":"Throttled","已选":"Selected","今日":"Today","累计":"Total to date","修改":"Edit","明细":"Details","合计":"Total","一致":"Match","我方":"Ours","差额":"Diff","月度":"Monthly","周度":"Weekly","账期":"Period","站点":"Site","停用":"Deactivate","只读":"Read-only","放弃":"Discard","校验":"Verify","创建":"Create","录入":"Enter","上号器":"万事大吉","加载态":"Loading state","本分钟":"This minute","退避中":"Backing off","未同步":"Unsynced","单渠道":"Per channel","创建人":"Creator","无条件":"Unconditional","按渠道":"By channel","按分组":"By group","差额%":"Diff %","待录入":"Not entered","渠道数":"Channels","已连接":"Connected","已停用":"Deactivated","并发数":"Concurrency","待处理":"Pending","用户管理":"Users","折叠侧栏":"Collapse sidebar","添加渠道":"Add channel","线框演示":"Wireframe demo","确认弹窗":"Confirm dialog","批量结果":"Batch result","渠道总数":"Total channels","今日消耗":"Today's usage","拉取队列":"Pull queue","· 并发":"· concurrency","/分 ·":"/min ·","收起 ▴":"Collapse ▴","批量启用":"Enable selected","批量禁用":"Disable selected","取消选择":"Clear selection","渠道ID":"Channel ID","今日之前":"Before today","从未更新":"Never updated","每日消耗":"Daily usage","测试消耗":"Test usage","我方口径":"Our source","网关口径":"Gateway source","两日合计":"2-day total","网关日志":"Gateway log","发现时间":"Found at","重新绑定":"Rebind","自检异常":"Self-check anomalies","手动录入":"Manual entry","锁定账期":"Lock period","我方金额":"Our amount","对方金额":"Their amount","自动通过":"Auto-passed","提出异议":"Dispute","我的账号":"My account","更新密码":"Update password","仅管理员":"Admin only","站点名称":"Site name","添加网关":"Add gateway","令牌失效":"Token invalid","拉取限流":"Pull rate limits","次/分钟":"/min","对账容差":"Reconciliation tolerance","账单时间":"Billing schedule","开始拉取":"Pull starts","失败重试":"Retry on failure","账单发布":"Bill publishing","逗号分隔":"Comma-separated","站点地址":"Site URL","管理令牌":"Admin token","确认绑定":"Confirm rebind","新用户名":"New username","初始密码":"Initial password","确认重置":"Confirm reset","按供应商":"By supplier","日志缺失":"Log missing","累计变小":"Total decreased","测试中…":"Testing…","显示/隐藏":"Show/Hide","全选当前页":"Select all on page","按渠道类型":"By channel type","供应商对账":"Supplier reconciliation","标记已处理":"Mark resolved","未同步渠道":"Unsynced channels","禁用渠道？":"Disable channel?","重试失败项":"Retry failed","禁用仍消耗":"Usage while disabled","网关上已删除":"Deleted on gateway","暂无账单数据":"No billing data yet","渠道核对结果":"Channel check results","每日核对容差":"Daily check tolerance","每日自动核对":"Daily auto-check","网关上找不到":"Missing on gateway","（已不存在）":"(no longer exists)","启用连续为0":"Enabled but zero","上传 CSV":"Upload CSV","导出 CSV":"Export CSV","至少 8 位":"At least 8 characters","全局拉取上限":"Global pull limit","系统访问令牌":"System access token","重新绑定渠道":"Rebind channel","批量启用完成":"Batch enable finished","批量禁用完成":"Batch disable finished","又被自动禁用":"Auto-disabled again","联系管理员开户":"Contact an admin for an account","筛选已收起 ·":"Filters collapsed ·","仅作用于当前页":"Current page only","分组 / 渠道":"Group / Channel","一致 / 总数":"match / total","供应商自动通过":"Supplier auto-pass","单渠道拉取上限":"Per-channel pull limit","有未保存的更改":"Unsaved changes","确认后立即生效":"Takes effect immediately","用户名或密码错误":"Incorrect username or password","限流由管理员配置":"Rate limits are set by an admin","汇总中（发布前）":"Summarizing (before publish)","占比 · 按渠道":"Share · by channel","前 7 + 其他":"Top 7 + Other","占比 · 按分组":"Share · by group","占比 · 按供应商":"Share · by supplier","前一日新建的渠道":"Channel created the previous day","仅按两日总额核对":"Checked on the 2-day total only","超出容差 ±1%":"Outside ±1% tolerance","最后一次成功拉取":"Last successful pull","立即重试 1 次":"Retry once immediately","手动录入对方金额":"Enter their amount","角色固定为供应商":"Role is always Supplier","其中又被自动禁用":"Auto-disabled again","线框演示：切换角色":"Wireframe demo: switch role","上 key（渠道）":"Keys (Channels)","设置 › 拉取限流":"Settings › Pull rate limits","操作 · 最近测试":"Actions · Last test","线框演示 · 状态":"Wireframe demo · State","下载 CSV 模板":"Download CSV template","供应商对账自动通过":"Supplier auto-pass","提供商（type）":"Provider (type)","请至少添加一个模型":"Add at least one model","条 · 20 条/页":"· 20 / page","全部渠道余额（缓存）":"All channel balances (cached)","我方 vs 网关日志":"Ours vs gateway log","我方 vs 对方金额":"Ours vs their amount","type · 提供商":"type · Provider","请输入 API 密钥":"Please enter an API key","账号、站点与拉取限流":"Account, site and pull limits","最近 30 天每日消耗":"Daily usage, last 30 days","修改当前登录账号的密码":"Change the password of the signed-in account","上游 502，连接超时":"Upstream 502, connection timed out","使用管理员分配的账号登录":"Sign in with the account your admin gave you","服务端检索中，不阻塞输入":"Searching on the server, typing isn't blocked","排序与筛选均由服务端执行":"Sorting and filtering run on the server","网关 / 分组 / 渠道":"Gateway / Group / Channel","请输入 1–20 的整数":"Enter a whole number from 1 to 20","请输入 1–600 的整数":"Enter a whole number from 1 to 600","1–60，且不大于全局上限":"1–60, not above the global limit","不阻塞发布，稍后自动补入":"Doesn't block publishing; filled in later","例如 gw-demo-3":"e.g. gw-demo-3","语言 / Language":"Language","仅统计通过上号器添加的渠道":"Only channels added through 万事大吉 are counted","最近 30 天 · 按账期":"Last 30 days · by period","账单未同步，补入后自动核对":"Bill not synced; checked after it's filled in","New API 渠道 ID":"New API channel ID","used_quota 零点差":"used_quota midnight delta","自动通过 ±2% · 未锁定":"Auto-pass ±2% · unlocked","拉完即发布，最晚 06:00":"Published when the pull finishes, by 06:00 at the latest","我的账号 · 账单时间（只读）":"My account · Billing schedule (read-only)","每日 00:00（拉取前一日）":"Daily 00:00 (pulls the previous day)","管理令牌返回 401，请更新令牌":"Admin token returned 401, please update it","JSON 格式可能不对，仍可保存":"JSON may be malformed, you can still save","请去掉结尾的 /v1（仍可保存）":"Remove the trailing /v1 (you can still save)","结尾带了 /v1，建议去掉（仍可保存）":"Ends with /v1, consider removing it (you can still save)","启用后测试返回 401 密钥无效":"Test after enabling returned 401 invalid key","拉取未同步 · 尚未成功拉取过余额":"Unsynced · balance never pulled","· 渠道测试产生，不计入供应商合计":"· from channel tests, not in supplier totals","与账单数据自身比对，不依赖网关日志":"Checked against the bill itself, no gateway log needed","· 所有密钥、域名、金额均为虚构示例":"· All keys, domains and amounts are fake examples","按分组小计 · 「今日」= 当前账期日":"Subtotals by group · \"Today\" = current period day","在 New API 后台查到的新 ID":"New ID from the New API admin","差额百分比在容差内视为一致 / 自动通过":"Diff % within tolerance counts as match / auto-pass","按渠道录入供应商后台显示的金额（USD）":"Enter the amount shown in the supplier's dashboard, per channel (USD)","万事大吉 v2.1 · 线框 · 虚构数据":"万事大吉 v2.1 · wireframe · fake data","/api/log/stat 无该渠道记录":"/api/log/stat has no record for this channel","月度为主，可切周度 · 自动通过 ±2%":"Monthly by default, weekly optional · auto-pass ±2%","拉取退避中 · 上游限流，倒计时结束后重试":"Backing off · upstream rate limit, retries after countdown","拉取降频 · 超过单渠道 5/分，已自动降频":"Throttled · over 5/min per channel, slowed down","仅管理员 · 创建 / 禁用供应商、重置密码":"Admin only · create / disable suppliers, reset passwords","超出后进入排队；上游返回 429 时自动退避":"Excess requests queue; backs off on upstream 429","输入后点击「校验」，确认找到的渠道正确再绑定":"Enter it and click Verify; rebind once the found channel looks right","New API 站点根地址，结尾不要带 /v1":"New API site root URL, without a trailing /v1","完整基础 URL (支持 {model} 变量)":"Full base URL (supports {model} variable)","502 Bad Gateway · 上游连接超时":"502 Bad Gateway · upstream connection timed out","拉取排队 · 全局队列等待中（本分钟配额或并发已满）":"Queued · waiting in the global queue (minute quota or concurrency full)","OpenAI Organization ID（可选）":"OpenAI Organization ID (optional)","仅分组展示，不做网关合计核对（网关总量含其他人的渠道）":"Grouping only, no gateway total check (gateway total includes other people's channels)","00:00 开始 · 拉完即发布 · 最晚 06:00":"Starts 00:00 · publishes when done · by 06:00","所有通过上号器添加的渠道 · 服务端分页 20 条/页":"All channels added through 万事大吉 · server-side paging, 20 / page","仅显示你通过上号器添加的渠道 · 服务端分页 20 条/页":"Only your channels added through 万事大吉 · server-side paging, 20 / page","从未成功拉取，不计为 0，不计入小计、合计与 donut":"Never pulled; not counted as 0 and left out of subtotals, totals and donuts","每次账单发布后自动运行 · 差额 = 我方 − 网关日志":"Runs after every bill publish · Diff = ours − gateway log","拖入或点击上传 · 批量模式下可上传多个 JSON 文件":"Drag or click to upload · multiple JSON files in batch mode","为此渠道将客户端请求中的模型名称映射为发送到上游的名称。":"Map model names in client requests to the names sent upstream for this channel.","渠道号 / 名称，可粘贴多个 ID（逗号、空格或换行分隔）":"Channel ID / name; paste several IDs (comma, space or newline)","单渠道测试冷却 10 分钟；保存或启用后会自动测试 1 次":"10-minute test cooldown per channel; tested once automatically after saving or enabling","未同步渠道显示「—」，不计为 0，不计入小计、合计与 donut。":"Unsynced channels show \"—\"; not counted as 0 and left out of subtotals, totals and donuts.","时间均为北京时间（Asia/Shanghai），如需调整请联系开发":"All times are Beijing time (Asia/Shanghai); ask the developers to change them","拉取失败 · 重试用尽 · 最后错误：502 Bad Gateway":"Pull failed · retries used up · last error: 502 Bad Gateway","上号器连接的 New API 网关；渠道的增删改与拉取都通过管理令牌执行":"New API gateways connected to 万事大吉; channel changes and pulls use the admin token","客户端与上游 API 格式一致时开启；模型重定向、参数覆盖和格式转换将失效":"Turn on when the client and upstream API formats match; model redirects, parameter overrides and format conversion stop working","New API「个人设置 › 系统访问令牌」，需管理员权限；保存后仅显示末 4 位":"New API \"Personal settings › System access token\", admin rights needed; only the last 4 characters show after saving","本地记录的 New API 渠道 ID 在网关上已不存在（如在 New API 后台删除后重建）":"The stored New API channel ID no longer exists on the gateway (e.g. deleted and recreated in New API)","差额 = 我方 − 对方；|差额%| ≤ 2% 自动通过。两日合计行只按两日总额核对。你只能看到自己的渠道。":"Diff = ours − theirs; |Diff %| ≤ 2% auto-passes. 2-day total rows are checked on the 2-day total only. You only see your own channels.","差额 = 我方 − 对方；|差额%| ≤ 2% 自动通过。两日合计行只按两日总额核对。锁定后账期不可修改，只能追加调整记录。":"Diff = ours − theirs; |Diff %| ≤ 2% auto-passes. 2-day total rows are checked on the 2-day total only. Locked periods can't be edited, only adjusted.","· 时间线：00:00 开始拉取前一日 → 失败渠道立即重试 1 次 → 拉完即发布（最晚 06:00）→ 未同步渠道稍后自动补入（北京时间）":"· Timeline: 00:00 pull the previous day → retry failed channels once → publish when done (by 06:00) → unsynced channels filled in later (Beijing time)","该渠道 2026-10-17 未同步，数据在次日 00:00 之后才补齐，上游无法区分两天用量，因此 10-17 与 10-18 合并记为一行，不拆分。":"This channel was unsynced on 2026-10-17 and only filled in after the next midnight. Upstream can't split the two days, so 10-17 and 10-18 are one merged row.","当前累计":"Current total","不可绑定":"Can't bind","已找到":"Found","未找到":"Not found","绑定历史":"Bind history","至今":"now","请联系管理员重新绑定":"Ask an admin to rebind","绑定后以此刻累计为起点，绑定前的消耗不计入":"After binding, usage counts from the current total; earlier usage isn't included","已重新绑定":"Rebound","429 额度耗尽":"429 quota exhausted","401 密钥无效":"401 invalid key","已锁定":"Locked","调整":"Adjustment","追加调整":"Add adjustment","汇总中":"Summarizing","密钥无效":"invalid key","额度耗尽":"quota exhausted","拉取正常 · 最近一次拉取成功":"Pull OK · last pull succeeded","中":"中"};
+const I18N_EN = {"供应商":"Supplier","管理员":"Admin","登录":"Login","用户名":"Username","请输入用户名":"Please enter your username","密码":"Password","显示":"Show","请输入密码":"Please enter your password","设置":"Settings","渠道管理":"Channels","网关":"Gateway","运行中":"Running","正常":"OK","失败":"Failed","搜索":"Search","分组":"Group","全部":"All","重置":"Reset","手动禁用":"Manually disabled","自动禁用":"Auto-disabled","名称":"Name","类型":"Type","成功率":"Success rate","余额":"Balance","状态":"Status","自动":"Auto","禁用":"Disable","创建时间":"Created","测试":"Test","未测试":"Not tested","启用":"Enable","上一页":"Previous page","下一页":"Next page","已发布":"Published","加载中":"Loading","空":"Empty","总消耗":"Total usage","剩余额度":"Remaining quota","剩余":"Remaining","已用":"Used","新建":"New","渠道":"Channel","操作":"Actions","备注":"Remark","确认":"Confirm","待确认":"Pending","创建供应商":"Create supplier","角色":"Role","最后登录":"Last Login","重置密码":"Reset password","已禁用":"Disabled","当前密码":"Current Password","新密码":"New password","测试连接":"Test Connection","编辑":"Edit","保存更改":"Save changes","创建渠道":"Create Channel","配置连接和模型后创建渠道。":"Configure the connection and models, then create the channel.","当前：":"Current:","阿里百炼":"Ali","火山方舟":"VolcEngine","智谱GLM":"Zhipu GLM","腾讯":"Tencent","高级自定义":"Advanced Custom","任务插件":"Task Plugin","百度":"Baidu","百度 V2":"Baidu V2","讯飞":"Xunfei","自定义":"Custom","智谱":"Zhipu","更换提供商":"Change provider","关闭":"Close","连接与模型":"Connection & Models","路由与映射":"Routing & Mapping","请求与响应":"Request & Response","其他设置":"Other Settings","基本信息":"Basic Information","名称、供应商类型和可用状态。":"Name, provider type, and availability.","例如，OpenAI GPT-4 生产环境":"e.g., OpenAI GPT-4 Production","请输入名称":"Please enter a name","已启用":"Enabled","启用或禁用此渠道":"Enable or disable this channel","OpenAI 组织":"OpenAI Organization","API 访问":"API Access","例如，https://docs-test-001.openai.azure.com":"e.g., https://docs-test-001.openai.azure.com","您的 Azure OpenAI 端点 URL":"Your Azure OpenAI endpoint URL","默认 API 版本":"Default API Version","例如，2025-04-01-preview":"e.g., 2025-04-01-preview","此渠道的默认 API 版本":"Default API version for this channel","响应 API 版本":"Responses API Version","例如，preview":"e.g., preview","默认响应 API 版本，如果为空，将使用上面的 API 版本":"Default Responses API version, if empty, will use the API version above","例如，https://api.openai.com/v1/chat/completions":"e.g., https://api.openai.com/v1/chat/completions","模型版本":"Model Version","例如，v2.1":"e.g., v2.1","Spark 模型版本，例如 v2.1（API URL 中的版本号）":"Spark model version, e.g., v2.1 (version number in API URL)","企业账户":"Enterprise Account","如果这是具有特殊响应格式的 OpenRouter 企业账户，则启用":"Enable if this is an OpenRouter enterprise account with special response format","AWS 接口":"AWS API","InvokeModel（旧接口）":"InvokeModel (legacy)","AWS 密钥格式":"AWS Key Format","API 密钥":"API Key","AK/SK 模式：使用 AccessKey|SecretAccessKey|Region":"AK/SK mode: use AccessKey|SecretAccessKey|Region","私有部署 URL":"Private Deployment URL","对于私有部署，格式为：https://fastgpt.run/api/openapi":"For private deployments, format: https://fastgpt.run/api/openapi","API 基础 URL (重要：非聊天 API)":"API Base URL (Important: Not Chat API)","例如，https://api.example.com (在 /suno 之前的路径)":"e.g., https://api.example.com (path before /suno)","账户 ID":"Account ID","例如，d6b5da8hk1awo8nap34ube6gh":"e.g., d6b5da8hk1awo8nap34ube6gh","您的 Cloudflare 账户 ID":"Your Cloudflare Account ID","Vertex AI 密钥格式":"Vertex AI Key Format","JSON 格式支持服务账户 JSON 文件":"JSON format supports service account JSON files","Vertex AI 项目 ID":"Vertex AI Project ID","例如 my-project-123":"e.g., my-project-123","服务账号 JSON 文件":"Service account JSON file(s)","部署区域":"Deployment Region","例如，us-central1 或模型特定区域的 JSON 格式":"e.g., us-central1 or JSON format for model-specific regions","API 基础 URL":"API Base URL","选择 API 终端节点区域":"Select the API endpoint region","代理 ID":"Agent ID","例如，7342866812345":"e.g., 7342866812345","输入 Coze 代理 ID":"Enter the Coze agent ID","API 地址":"API Address","自定义 API 基础 URL。对于官方渠道，New API 具有内置地址。仅针对第三方代理站点或特殊端点填写此项。请勿添加 /v1 或尾部斜杠。":"Custom API base URL. For official channels, New API has built-in addresses. Only fill this for third-party proxy sites or special endpoints. Do not add /v1 or trailing slash.","高级自定义路由":"Advanced Custom Routes","凭证":"Credentials","身份验证":"Authentication","添加模式":"Add Mode","单密钥":"Single Key","批量添加（每行一个密钥）":"Batch Add (one key per line)","多密钥模式（多个密钥，一个渠道）":"Multi-Key Mode (multiple keys, one channel)","移除重复项":"Remove Duplicates","每行输入一个 API 密钥进行批量创建":"Enter one API key per line for batch creation","多密钥策略":"Multi-Key Strategy","随机":"Random","轮询":"Polling","每次请求从池中随机选择一个密钥":"Randomly select a key from the pool for each request","密钥更新模式":"Key Update Mode","追加到现有密钥":"Append to existing keys","替换所有现有密钥":"Replace all existing keys","追加模式：新键将添加到现有键列表的末尾":"Append mode: New keys will be added to the end of the existing key list","模型与分组":"Models & Groups","已发布的模型、分组和模型重映射规则。":"Published models, groups, and model remapping rules.","上游任务插件":"Upstream task plugins","选择上游网关已安装的任务插件":"Select the task plugins installed on the upstream gateway","模型":"Models","设置模型重定向":"Set up model redirects","选择模型或添加自定义模型":"Select models or add custom ones","填入相关模型":"Fill Related Models","从上游获取":"Fetch from Upstream","全部复制":"Copy All","清除全部":"Clear all","请选择可以访问此渠道的用户组。":"Please Select user groups that can access this channel.","模型映射":"Model Mapping","路由策略":"Routing Strategy","优先级":"Priority","优先级更高的渠道优先被选中":"Higher priority channels are selected first","权重":"Weight","用于负载均衡。权重越高 = 请求越多":"Used for load balancing. Higher weight = more requests","测试模型":"Test Model","测试渠道连接时使用的模型":"Model to use when testing channel connectivity","自动封禁":"Auto Ban","重复失败时自动禁用渠道":"Automatically disable channel on repeated failures","覆盖规则":"Override Rules","状态码映射":"Status Code Mapping","将上游状态码映射到不同的代码":"Map upstream status codes to different codes","参数覆盖":"Parameter Override","覆盖请求参数。无法覆盖 stream 参数。":"Override request parameters. Cannot override stream parameter.","请求头覆盖":"Request Header Override","覆盖请求头（JSON 格式）":"Override request headers (JSON format)","请求处理":"Request processing","强制格式化":"Force Format","强制将响应格式化为 OpenAI 标准（仅限 OpenAI 渠道）":"Force format response to OpenAI standard (OpenAI channel only)","使用 Ollama 的 OpenAI 兼容对话接口":"Use OpenAI-compatible Ollama chat API","思维到内容":"Thinking to Content","将 reasoning_content 转换为 content 中的 <think> 标签":"Convert reasoning_content to <think> tag in content","透传请求体":"Pass Through Body","系统提示词":"System Prompt","输入系统提示词（用户提示词优先）":"Enter system prompt (user prompt takes priority)","系统提示词连接":"System Prompt Concatenation","将渠道系统提示与用户的提示连接起来":"Concatenate channel system prompt with user&apos;s prompt","字段透传控制":"Field passthrough controls","允许透传 service_tier":"Allow service_tier passthrough","禁止透传 store":"Disable store passthrough","允许透传 safety_identifier":"Allow safety_identifier passthrough","允许 include 用量混淆透传":"Allow include usage obfuscation passthrough","允许 inference_geo 透传":"Allow inference_geo passthrough","允许 speed 透传":"Allow speed passthrough","允许 Claude beta 查询透传":"Allow Claude beta query passthrough","渠道额外设置":"Channel Extra Settings","跳过异步任务轮询延迟":"Skip async task polling delay","该渠道轮询异步任务时不等待一秒":"Do not wait one second between polling async tasks for this channel","代理地址":"Proxy Address","此渠道的网络代理（支持 HTTP、HTTPS、SOCKS5 和 SOCKS5H）":"Network proxy for this channel (supports HTTP, HTTPS, SOCKS5, and SOCKS5H)","HTTP 协议":"HTTP Protocol","HTTP/2 连接分片":"HTTP/2 Connection Shards","忽略上游证书校验":"Skip Upstream TLS Verification","检测上游模型设置":"Upstream Model Detection Settings","上游模型更新检查":"Upstream Model Update Check","自动同步上游模型":"Auto Sync Upstream Models","已忽略上游模型":"Ignored upstream models","内部备注":"Internal Notes","标签":"Tag","用于分组渠道的可选标签":"Optional tag for grouping channels","关于此渠道的可选备注":"Optional notes about this channel","取消":"Cancel","保存":"Save","发送":"Send","其他":"Other","API 密钥（批量模式下每行一个）":"API Key (one per line for batch mode)","成功":"Success","结果":"Result","原因":"Reason","项":"items","共":"Total","个":"","退出":"Sign out","账单":"Billing","对账":"Reconcile","抽屉":"Drawer","空态":"Empty state","异常":"Anomaly","排队":"Queued","降频":"Throttled","已选":"Selected","今日":"Today","累计":"Total to date","修改":"Edit","明细":"Details","合计":"Total","一致":"Match","我方":"Ours","差额":"Diff","月度":"Monthly","周度":"Weekly","账期":"Period","站点":"Site","停用":"Deactivate","只读":"Read-only","放弃":"Discard","校验":"Verify","创建":"Create","录入":"Enter","上号器":"万事大吉","加载态":"Loading state","本分钟":"This minute","退避中":"Backing off","未同步":"Unsynced","单渠道":"Per channel","创建人":"Creator","无条件":"Unconditional","按渠道":"By channel","按分组":"By group","差额%":"Diff %","待录入":"Not entered","渠道数":"Channels","已连接":"Connected","已停用":"Deactivated","并发数":"Concurrency","待处理":"Pending","用户管理":"Users","折叠侧栏":"Collapse sidebar","添加渠道":"Add channel","线框演示":"Wireframe demo","确认弹窗":"Confirm dialog","批量结果":"Batch result","渠道总数":"Total channels","今日消耗":"Today's usage","拉取队列":"Pull queue","· 并发":"· concurrency","/分 ·":"/min ·","收起 ▴":"Collapse ▴","批量启用":"Enable selected","批量禁用":"Disable selected","取消选择":"Clear selection","渠道ID":"Channel ID","今日之前":"Before today","从未更新":"Never updated","每日消耗":"Daily usage","测试消耗":"Test usage","我方口径":"Our source","网关口径":"Gateway source","两日合计":"2-day total","网关日志":"Gateway log","发现时间":"Found at","重新绑定":"Rebind","自检异常":"Self-check anomalies","手动录入":"Manual entry","锁定账期":"Lock period","我方金额":"Our amount","对方金额":"Their amount","自动通过":"Auto-passed","提出异议":"Dispute","我的账号":"My account","更新密码":"Update password","仅管理员":"Admin only","站点名称":"Site name","添加网关":"Add gateway","令牌失效":"Token invalid","拉取限流":"Pull rate limits","次/分钟":"/min","对账容差":"Reconciliation tolerance","账单时间":"Billing schedule","开始拉取":"Pull starts","失败重试":"Retry on failure","账单发布":"Bill publishing","逗号分隔":"Comma-separated","站点地址":"Site URL","管理令牌":"Admin token","确认绑定":"Confirm rebind","新用户名":"New username","初始密码":"Initial password","确认重置":"Confirm reset","按供应商":"By supplier","日志缺失":"Log missing","累计变小":"Total decreased","测试中…":"Testing…","显示/隐藏":"Show/Hide","全选当前页":"Select all on page","按渠道类型":"By channel type","供应商对账":"Supplier reconciliation","标记已处理":"Mark resolved","未同步渠道":"Unsynced channels","禁用渠道？":"Disable channel?","重试失败项":"Retry failed","禁用仍消耗":"Usage while disabled","网关上已删除":"Deleted on gateway","暂无账单数据":"No billing data yet","渠道核对结果":"Channel check results","每日核对容差":"Daily check tolerance","每日自动核对":"Daily auto-check","网关上找不到":"Missing on gateway","（已不存在）":"(no longer exists)","启用连续为0":"Enabled but zero","上传 CSV":"Upload CSV","导出 CSV":"Export CSV","至少 8 位":"At least 8 characters","全局拉取上限":"Global pull limit","系统访问令牌":"System access token","重新绑定渠道":"Rebind channel","批量启用完成":"Batch enable finished","批量禁用完成":"Batch disable finished","又被自动禁用":"Auto-disabled again","联系管理员开户":"Contact an admin for an account","筛选已收起 ·":"Filters collapsed ·","仅作用于当前页":"Current page only","分组 / 渠道":"Group / Channel","一致 / 总数":"match / total","供应商自动通过":"Supplier auto-pass","单渠道拉取上限":"Per-channel pull limit","有未保存的更改":"Unsaved changes","确认后立即生效":"Takes effect immediately","用户名或密码错误":"Incorrect username or password","限流由管理员配置":"Rate limits are set by an admin","汇总中（发布前）":"Summarizing (before publish)","占比 · 按渠道":"Share · by channel","前 7 + 其他":"Top 7 + Other","占比 · 按分组":"Share · by group","占比 · 按供应商":"Share · by supplier","前一日新建的渠道":"Channel created the previous day","仅按两日总额核对":"Checked on the 2-day total only","超出容差 ±1%":"Outside ±1% tolerance","最后一次成功拉取":"Last successful pull","立即重试 1 次":"Retry once immediately","手动录入对方金额":"Enter their amount","角色固定为供应商":"Role is always Supplier","其中又被自动禁用":"Auto-disabled again","线框演示：切换角色":"Wireframe demo: switch role","上 key（渠道）":"Keys (Channels)","设置 › 拉取限流":"Settings › Pull rate limits","操作 · 最近测试":"Actions · Last test","线框演示 · 状态":"Wireframe demo · State","下载 CSV 模板":"Download CSV template","供应商对账自动通过":"Supplier auto-pass","提供商（type）":"Provider (type)","请至少添加一个模型":"Add at least one model","条 · 20 条/页":"· 20 / page","全部渠道余额（缓存）":"All channel balances (cached)","我方 vs 网关日志":"Ours vs gateway log","我方 vs 对方金额":"Ours vs their amount","type · 提供商":"type · Provider","请输入 API 密钥":"Please enter an API key","账号、站点与拉取限流":"Account, site and pull limits","最近 30 天每日消耗":"Daily usage, last 30 days","修改当前登录账号的密码":"Change the password of the signed-in account","上游 502，连接超时":"Upstream 502, connection timed out","使用管理员分配的账号登录":"Sign in with the account your admin gave you","服务端检索中，不阻塞输入":"Searching on the server, typing isn't blocked","排序与筛选均由服务端执行":"Sorting and filtering run on the server","网关 / 分组 / 渠道":"Gateway / Group / Channel","请输入 1–20 的整数":"Enter a whole number from 1 to 20","请输入 1–600 的整数":"Enter a whole number from 1 to 600","1–60，且不大于全局上限":"1–60, not above the global limit","不阻塞发布，稍后自动补入":"Doesn't block publishing; filled in later","例如 gw-demo-3":"e.g. gw-demo-3","语言 / Language":"Language","仅统计通过上号器添加的渠道":"Only channels added through 万事大吉 are counted","最近 30 天 · 按账期":"Last 30 days · by period","账单未同步，补入后自动核对":"Bill not synced; checked after it's filled in","New API 渠道 ID":"New API channel ID","used_quota 零点差":"used_quota midnight delta","自动通过 ±2% · 未锁定":"Auto-pass ±2% · unlocked","拉完即发布，最晚 06:00":"Published when the pull finishes, by 06:00 at the latest","我的账号 · 账单时间（只读）":"My account · Billing schedule (read-only)","每日 00:00（拉取前一日）":"Daily 00:00 (pulls the previous day)","管理令牌返回 401，请更新令牌":"Admin token returned 401, please update it","JSON 格式可能不对，仍可保存":"JSON may be malformed, you can still save","请去掉结尾的 /v1（仍可保存）":"Remove the trailing /v1 (you can still save)","结尾带了 /v1，建议去掉（仍可保存）":"Ends with /v1, consider removing it (you can still save)","启用后测试返回 401 密钥无效":"Test after enabling returned 401 invalid key","拉取未同步 · 尚未成功拉取过余额":"Unsynced · balance never pulled","· 渠道测试产生，不计入供应商合计":"· from channel tests, not in supplier totals","与账单数据自身比对，不依赖网关日志":"Checked against the bill itself, no gateway log needed","· 所有密钥、域名、金额均为虚构示例":"· All keys, domains and amounts are fake examples","按分组小计 · 「今日」= 当前账期日":"Subtotals by group · \"Today\" = current period day","在 New API 后台查到的新 ID":"New ID from the New API admin","差额百分比在容差内视为一致 / 自动通过":"Diff % within tolerance counts as match / auto-pass","按渠道录入供应商后台显示的金额（USD）":"Enter the amount shown in the supplier's dashboard, per channel (USD)","万事大吉 v2.2 · 线框 · 虚构数据":"万事大吉 v2.1 · wireframe · fake data","/api/log/stat 无该渠道记录":"/api/log/stat has no record for this channel","月度为主，可切周度 · 自动通过 ±2%":"Monthly by default, weekly optional · auto-pass ±2%","拉取退避中 · 上游限流，倒计时结束后重试":"Backing off · upstream rate limit, retries after countdown","拉取降频 · 超过单渠道 5/分，已自动降频":"Throttled · over 5/min per channel, slowed down","仅管理员 · 创建 / 禁用供应商、重置密码":"Admin only · create / disable suppliers, reset passwords","超出后进入排队；上游返回 429 时自动退避":"Excess requests queue; backs off on upstream 429","输入后点击「校验」，确认找到的渠道正确再绑定":"Enter it and click Verify; rebind once the found channel looks right","New API 站点根地址，结尾不要带 /v1":"New API site root URL, without a trailing /v1","完整基础 URL (支持 {model} 变量)":"Full base URL (supports {model} variable)","502 Bad Gateway · 上游连接超时":"502 Bad Gateway · upstream connection timed out","拉取排队 · 全局队列等待中（本分钟配额或并发已满）":"Queued · waiting in the global queue (minute quota or concurrency full)","OpenAI Organization ID（可选）":"OpenAI Organization ID (optional)","仅分组展示，不做网关合计核对（网关总量含其他人的渠道）":"Grouping only, no gateway total check (gateway total includes other people's channels)","00:00 开始 · 拉完即发布 · 最晚 06:00":"Starts 00:00 · publishes when done · by 06:00","所有通过上号器添加的渠道 · 服务端分页 20 条/页":"All channels added through 万事大吉 · server-side paging, 20 / page","仅显示你通过上号器添加的渠道 · 服务端分页 20 条/页":"Only your channels added through 万事大吉 · server-side paging, 20 / page","从未成功拉取，不计为 0，不计入小计、合计与 donut":"Never pulled; not counted as 0 and left out of subtotals, totals and donuts","每次账单发布后自动运行 · 差额 = 我方 − 网关日志":"Runs after every bill publish · Diff = ours − gateway log","拖入或点击上传 · 批量模式下可上传多个 JSON 文件":"Drag or click to upload · multiple JSON files in batch mode","为此渠道将客户端请求中的模型名称映射为发送到上游的名称。":"Map model names in client requests to the names sent upstream for this channel.","渠道号 / 名称，可粘贴多个 ID（逗号、空格或换行分隔）":"Channel ID / name; paste several IDs (comma, space or newline)","单渠道测试冷却 10 分钟；保存或启用后会自动测试 1 次":"10-minute test cooldown per channel; tested once automatically after saving or enabling","未同步渠道显示「—」，不计为 0，不计入小计、合计与 donut。":"Unsynced channels show \"—\"; not counted as 0 and left out of subtotals, totals and donuts.","时间均为北京时间（Asia/Shanghai），如需调整请联系开发":"All times are Beijing time (Asia/Shanghai); ask the developers to change them","拉取失败 · 重试用尽 · 最后错误：502 Bad Gateway":"Pull failed · retries used up · last error: 502 Bad Gateway","上号器连接的 New API 网关；渠道的增删改与拉取都通过管理令牌执行":"New API gateways connected to 万事大吉; channel changes and pulls use the admin token","客户端与上游 API 格式一致时开启；模型重定向、参数覆盖和格式转换将失效":"Turn on when the client and upstream API formats match; model redirects, parameter overrides and format conversion stop working","New API「个人设置 › 系统访问令牌」，需管理员权限；保存后仅显示末 4 位":"New API \"Personal settings › System access token\", admin rights needed; only the last 4 characters show after saving","本地记录的 New API 渠道 ID 在网关上已不存在（如在 New API 后台删除后重建）":"The stored New API channel ID no longer exists on the gateway (e.g. deleted and recreated in New API)","差额 = 我方 − 对方；|差额%| ≤ 2% 自动通过。两日合计行只按两日总额核对。你只能看到自己的渠道。":"Diff = ours − theirs; |Diff %| ≤ 2% auto-passes. 2-day total rows are checked on the 2-day total only. You only see your own channels.","差额 = 我方 − 对方；|差额%| ≤ 2% 自动通过。两日合计行只按两日总额核对。锁定后账期不可修改，只能追加调整记录。":"Diff = ours − theirs; |Diff %| ≤ 2% auto-passes. 2-day total rows are checked on the 2-day total only. Locked periods can't be edited, only adjusted.","· 时间线：00:00 开始拉取前一日 → 失败渠道立即重试 1 次 → 拉完即发布（最晚 06:00）→ 未同步渠道稍后自动补入（北京时间）":"· Timeline: 00:00 pull the previous day → retry failed channels once → publish when done (by 06:00) → unsynced channels filled in later (Beijing time)","该渠道 2026-10-17 未同步，数据在次日 00:00 之后才补齐，上游无法区分两天用量，因此 10-17 与 10-18 合并记为一行，不拆分。":"This channel was unsynced on 2026-10-17 and only filled in after the next midnight. Upstream can't split the two days, so 10-17 and 10-18 are one merged row.","当前累计":"Current total","不可绑定":"Can't bind","已找到":"Found","未找到":"Not found","绑定历史":"Bind history","至今":"now","请联系管理员重新绑定":"Ask an admin to rebind","绑定后以此刻累计为起点，绑定前的消耗不计入":"After binding, usage counts from the current total; earlier usage isn't included","已重新绑定":"Rebound","429 额度耗尽":"429 quota exhausted","401 密钥无效":"401 invalid key","已锁定":"Locked","调整":"Adjustment","追加调整":"Add adjustment","汇总中":"Summarizing","密钥无效":"invalid key","额度耗尽":"quota exhausted","拉取正常 · 最近一次拉取成功":"Pull OK · last pull succeeded","中":"中"};
 const I18N_RX = [["选择 #(\\d+)","Select #$1"],["测试 #(\\d+) 冷却中","Test #$1 (cooling down)"],["测试 #(\\d+)","Test #$1"],["正常 (\\d+)ms","OK $1ms"],["失败 (\\d+)","Failed $1"],["测试通过 · 响应 (\\d+)ms","Passed · $1ms response"],["更新于 (\\d+) 分钟前","$1 min ago"],["上次同步 (\\d+) 分钟前","Last sync $1 min ago"],["上次同步 (.+)","Last sync $1"],["今天 (\\d\\d:\\d\\d)","Today $1"],["昨天 (\\d\\d:\\d\\d)","Yesterday $1"],["(\\d+) 个","$1"],["(\\d+) 个渠道","$1 channels"],["· (\\d+) 个渠道","· $1 channels"],["· (\\d+) 个渠道 ·","· $1 channels ·"],["小计 · (\\d+) 个渠道","Subtotal · $1 channels"],["(\\d+) 个异常","$1 anomalies"],["(\\d+) 分","$1 min"],["备注 (\\d+)","Notes $1"],["重复 (\\d+)","$1 duplicate"],["已识别 (\\d+) 条","$1 keys detected"],["（(\\d+) 项）","($1 items)"],["重试失败项（(\\d+)）","Retry failed ($1)"],["占 (.+)","$1 share"],["剩余 ([\\d.]+%)","$1 left"],["补入 (\\d\\d:\\d\\d)","Filled in $1"],["已更新 (\\d+) 个渠道","Updated $1 channels"],["最近测试 (.+)","Last test $1"],["汇总中 (\\d+/\\d+)","Summarizing $1"],["总消耗 · 账期 (.+)","Total usage · period $1"],["(40\\d|42\\d) (.+) · (\\d\\d:\\d\\d)","$1 $2 · $3"],["自动禁用 (\\S+ \\S+) · (.+)","Auto-disabled $1 · $2"],["连续 (\\d+) 次测试失败 · (.+)","$1 failed tests in a row · $2"],["连续 (\\d+) 次测试失败","$1 failed tests in a row"],["另有 (\\d+) 个渠道未同步，未计入","$1 more unsynced channels not counted"],["另有 (\\d+) 个渠道未同步，未计入 · 测试消耗 (\\S+) 单独列示，不计入","$1 more unsynced channels not counted · test usage $2 listed separately"],["昨日 (\\S+) · (\\S+)","Yesterday $1 · $2"],["自动禁用 (\\d+) · 拉取失败 (\\d+)","Auto-disabled $1 · pull failed $2"],["已发布 (.+)","Published $1"],["已核对 (.+)","Checked $1"],["账期 (\\S+) · 拉完即发布 · 最晚 06:00","Period $1 · published when done · by 06:00"],["账期 (\\S+) · 汇总中 (\\S+) · 预计 (\\d+) 分钟 · 最晚 06:00 发布","Period $1 · summarizing $2 · about $3 min · published by 06:00"],["账期 (\\S+) · 账单发布后自动核对 · 完成于 (.+)","Period $1 · auto-checked after publish · done $2"],["首次账单将在 (\\S+) 最晚 06:00 发布","The first bill publishes by 06:00 on $1"],["发布时未同步，(\\S+) 自动补入","Unsynced at publish, filled in at $1"],["发布后 (\\S+) 补入，等待重新核对","Filled in at $1 after publish, waiting for recheck"],["New API #(\\d+) 不存在","New API #$1 missing"],["New API 渠道 ID (\\d+) 在网关上已不存在","New API channel ID $1 no longer exists on the gateway"],["手动禁用中，但账期内消耗 (\\S+)","Manually disabled, but used $1 in the period"],["累计 (\\S+) → (\\S+)（(\\S+)），上游可能重置了 used_quota","Total $1 → $2 ($3); upstream may have reset used_quota"],["仅按两日总额核对（(.+)）","Checked on the 2-day total only ($1)"],["发布后补入：(.+)","Filled in after publish: $1"],["运行中，连续 (\\d+) 天消耗 (\\S+)（(.+)）","Running, $2 usage for $1 days ($3)"],["(\\d+) 行格式可能不对，仍可保存","$1 lines may be malformed, you can still save"],["当前展示上一期已发布账单（账期 (\\S+)，已发布 (\\S+ \\S+)）· 账期 (\\S+) 汇总中：00:00 开始拉取，失败渠道立即重试 1 次，拉完即发布","Showing the last published bill (period $1, published $2) · period $3 summarizing: pull starts 00:00, failed channels retried once, published when done"],["#(\\d+) (.+)","#$1 $2"],["已选 (\\d+) 项","Selected $1"],["已重新绑定 (#\\d+→#\\d+)","Rebound $1"],["已被 #(\\d+)（(.+)）占用","Taken by #$1 ($2)"],["(\\S+ \\S+) 由 New API (#\\d+) 重新绑定到 (#\\d+)。绑定前的账单仍归原供应商；旧 ID 删除后到绑定前的空档按网关日志补齐，日志缺失则显示未同步；新 ID 从绑定时刻的累计起算。","Rebound from New API $2 to $3 at $1. Earlier bills stay with the original supplier; the gap between deleting the old ID and rebinding is filled from the gateway log, or shown as Unsynced if the log is missing. The new ID counts from its total at bind time."],["有 (\\d+) 项未保存的更改","$1 unsaved changes"],["共 (\\d+) 条","$1 total"]]; // [正则源, 英文模板]（动态文案）
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 let LANG = 'zh';
@@ -1606,7 +1662,7 @@ function setLang(l, remember) {
   LANG = l; if (remember) { localStorage.setItem('shq-lang', l); document.cookie = `shq-lang=${l}; path=/; max-age=31536000; SameSite=Lax`; }
   document.documentElement.lang = l === 'en' ? 'en-US' : 'zh-CN';
   document.querySelectorAll('.lang-toggle button').forEach(b => b.classList.toggle('active', b.dataset.lang === l));
-  document.title = l === 'en' ? '万事大吉 v2.1 — Wireframes' : '万事大吉 v2.1 — 线框';
+  document.title = l === 'en' ? '万事大吉 v2.2 — Wireframes' : '万事大吉 v2.2 — 线框';
   rerenderForLang(); i18nApply();
 }
 /* 金额 / 日期格式随语言：$ 两种语言都用；大额 zh 用「万」，en 用 K/M */
@@ -1757,7 +1813,7 @@ function genRows(page) {
       type: t[1], group: t[2], before: +(t[3] * k).toFixed(2), today: +(t[4] * k).toFixed(2),
       sr: t[5], bal: t[6], upd: t[7], pull: t[8], sec: t[9], status: t[10], autoInfo: t[11] || '',
       autoSw: t[10] !== 'manual' || i % 2 === 0,
-      test: null, naid: 40 + off + i * 3, gwMissing: page === 1 && i === 11,
+      test: null, naid: 40 + off + i * 3, gwMissing: GW_KIND !== 'seller' && page === 1 && i === 11, imported: GW_KIND === 'seller' && SELLER_IMPORTED && i % 3 === 1,
       owner: ROLE === 'admin' ? OWN_ORDER[(i * 3 + page) % 4] : 'supplier_demo',
       created: '2026-' + String(9 + (i % 2)).padStart(2, '0') + '-' + String(1 + (i * 3) % 28).padStart(2, '0') + ' ' + String(8 + i % 12).padStart(2, '0') + ':' + String((i * 17) % 60).padStart(2, '0'),
     });
@@ -1848,7 +1904,7 @@ function renderRows() {
     <tr class="${selected.has(r.id) ? 'sel' : ''}">
       <td><input type="checkbox" class="cb" ${selected.has(r.id) ? 'checked' : ''} onclick="toggleSel(${r.id}, this.checked)" aria-label="选择 #${r.id}" /></td>
       <td class="num muted-strong">#${r.id}</td>
-      <td><div class="name-cell">${r.name}</div></td>
+      <td><div class="name-cell">${r.name}${r.imported ? '<span class="pill pill-imp" data-tip="通过「导入已有渠道」登记，归属该供应商账号">导入</span>' : ''}</div></td>
       <td class="type-cell"><span class="type-in">${famAvatar(r.type)}<span>${r.type}</span></span></td>
       <td><span class="pill pill-group">${r.group}</span></td>
       <td class="r num">${fmt(r.before)}</td>
@@ -1947,6 +2003,7 @@ function askBatch(kind) {
   });
 }
 function runBatch(kind, rs) {
+  if (GW_KIND === 'seller') toast(`供应商账号网关不支持批量接口：逐个提交 ${rs.length} 个渠道…`);
   const ok = [], fail = [], reAuto = [];
   rs.forEach(r => {
     if (kind === 'enable' && r.pull === 'failed') fail.push({ r, why: '上游 502，连接超时' });
@@ -1956,6 +2013,7 @@ function runBatch(kind, rs) {
   });
   LAST_FAILED = fail.map(f => f.r.id);
   $('rsTitle').textContent = `${kind === 'enable' ? '批量启用' : '批量禁用'}完成`;
+  if (GW_KIND === 'seller') $('rsTitle').textContent += '（逐个提交）';
   $('rsSum').innerHTML = `<div><span>成功</span><b style="color:#1F9D45">${ok.length}</b></div><div><span>失败</span><b style="color:#D92D20">${fail.length}</b></div><div><span>其中又被自动禁用</span><b style="color:#C76F00">${reAuto.length}</b></div>`;
   const lines = fail.map(f => [f.r, '失败', f.why, 'st-auto']).concat(reAuto.map(f => [f.r, '又被自动禁用', f.why, 'st-manual']));
   $('rsList').style.display = lines.length ? 'block' : 'none';
@@ -2234,6 +2292,10 @@ const BILL = [
   { g: 'haishi', n: 'haishi-d', o: 'acme_supply', t: 'Azure OpenAI', today: 18.30, before: 402.10 },
   { g: 'default', n: 'default-01', o: 'blue_ocean', t: 'OpenAI', today: 12.75, before: 310.60, late: '05:20' },
   { g: 'default', n: 'default-02', o: 'supplier_demo', t: 'DeepSeek', unsynced: true },
+  // 供应商账号网关（ainow-seller）：0:00 快照差计费
+  { g: 'ainow', n: 'ainow-01', o: 'supplier_demo', t: 'Anthropic Claude', today: 52.30, before: 640.10, snap: true },
+  { g: 'ainow', n: 'ainow-02', o: 'supplier_demo', t: 'OpenAI', today: 18.75, before: 120.00, snap: true, imported: true },
+  { g: 'ainow', n: 'ainow-03', o: 'supplier_demo', t: 'Google Gemini', before: 210.40, snap: true, missing: true, unsynced: true },
 ];
 const TEST_COST = { admin: { today: 3.86, before: 92.40 }, supplier: { today: 1.12, before: 27.30 } };
 let BILL_STATE = 'published', TREND_LAST = null, TREND_TOTAL = 0;
@@ -2347,9 +2409,9 @@ function renderBilling() {
     const a = gs.reduce((s, r) => s + r.today, 0), b = gs.reduce((s, r) => s + r.before, 0); T.a += a; T.b += b;
     html += `<tr class="subtotal" data-g="${g}"><td><button class="grp-toggle" type="button" onclick="toggleGroup('${g}', this)">▾ ${g}</button> <span class="muted">小计 · ${gr.length} 个渠道</span></td><td class="admin-col"></td><td class="r num">${fmt(a)}</td><td class="r num">${fmt(b)}</td><td class="r num">${fmt(a + b)}</td></tr>`;
     gr.forEach(r => {
-      html += `<tr class="grow" data-g="${g}"><td class="indent">${r.n} ${r.unsynced ? '<span class="pp pp-unsynced" data-tip="从未成功拉取，不计为 0，不计入小计、合计与 donut">未同步</span>' : ''}${r.merged ? `<span class="pill pill-merge" data-tip='${MERGE_TIP}'>两日合计</span>` : ''}${r.isNew ? '<span class="pill pill-new" data-tip="前一日新建的渠道">新建</span>' : ''}${r.rebind ? `<span class="pill pill-merge" data-tip="${r.rbAt} 由 New API ${r.rebind.split('→')[0]} 重新绑定到 ${r.rebind.split('→')[1]}。绑定前的账单仍归原供应商；旧 ID 删除后到绑定前的空档按网关日志补齐，日志缺失则显示未同步；新 ID 从绑定时刻的累计起算。">已重新绑定 ${r.rebind}</span>` : ''}${r.late && !pending ? `<span class="late-pill" data-tip="发布时未同步，${r.late} 自动补入">补入 ${r.late}</span>` : ''}</td>
+      html += `<tr class="grow" data-g="${g}"><td class="indent">${r.n} ${r.missing ? '<span class="pp pp-unsynced" data-tip="该日缺少 0:00 快照：不记为 0，也不按平均值补，不计入小计、合计与 donut">缺数据</span>' : r.unsynced ? '<span class="pp pp-unsynced" data-tip="从未成功拉取，不计为 0，不计入小计、合计与 donut">未同步</span>' : ''}${r.snap ? '<span class="pill pill-snap" data-tip="供应商账号网关：按每日 0:00 快照的 used_quota 差计费">快照计费</span>' : ''}${r.imported ? '<span class="pill pill-imp" data-tip="通过「导入已有渠道」登记；从导入后的第一个 0:00 快照开始计费">导入</span>' : ''}${r.merged ? `<span class="pill pill-merge" data-tip='${MERGE_TIP}'>两日合计</span>` : ''}${r.isNew ? '<span class="pill pill-new" data-tip="前一日新建的渠道">新建</span>' : ''}${r.rebind ? `<span class="pill pill-merge" data-tip="${r.rbAt} 由 New API ${r.rebind.split('→')[0]} 重新绑定到 ${r.rebind.split('→')[1]}。绑定前的账单仍归原供应商；旧 ID 删除后到绑定前的空档按网关日志补齐，日志缺失则显示未同步；新 ID 从绑定时刻的累计起算。">已重新绑定 ${r.rebind}</span>` : ''}${r.late && !pending ? `<span class="late-pill" data-tip="发布时未同步，${r.late} 自动补入">补入 ${r.late}</span>` : ''}</td>
         <td class="admin-col"><span class="owner"><span class="blob blob-round blob-${OWNERS[r.o]}"></span>${r.o}</span></td>
-        ${r.unsynced ? '<td class="r muted">—</td><td class="r muted">—</td><td class="r muted">—</td>'
+        ${r.missing ? '<td class="r muted">缺数据</td><td class="r num">' + fmt(r.before || 0) + '</td><td class="r muted">缺数据</td>' : r.unsynced ? '<td class="r muted">—</td><td class="r muted">—</td><td class="r muted">—</td>'
           : `<td class="r num">${fmt(r.today)}${r.merged ? '<span class="sub2">10-17 + 10-18</span>' : ''}</td><td class="r num">${fmt(r.before)}</td><td class="r num">${fmt(r.today + r.before)}</td>`}</tr>`;
     });
   });
@@ -2374,7 +2436,7 @@ let RECON_TAB = 'daily', CYCLE = 'month', THREAD_ROW = null;
 const tolD = () => +($('tolDaily') && $('tolDaily').value) || 1;
 const tolS = () => +($('tolSup') && $('tolSup').value) || 2;
 function reconRows() {
-  return BILL.filter(r => ROLE === 'admin' || r.o === 'supplier_demo').map(r => {
+  return BILL.filter(r => !r.snap && (ROLE === 'admin' || r.o === 'supplier_demo')).map(r => {
     if (r.unsynced) return { ...r, st: 'uns' };
     const dev = LOG_DEV[r.n];
     if (dev === null) return { ...r, our: r.today, log: null, st: 'miss' };
@@ -2518,18 +2580,90 @@ function renderRecon() {
 }
 
 
+
+/* ===== v2.2 供应商账号网关（ainow，改版 New API v1.0.0-rc.25-fix-116，/api/seller/channel/*） ===== */
+let GW_KIND = 'std', SELLER_FULL = false, RENEW_FAIL = false, SELLER_IMPORTED = false;
+let SELLER_LIMIT = 25; // 演示值：实际从站点返回的 max_channels 实时读取，不写死
+function setGwKind(k) {
+  GW_KIND = k === 'seller' ? 'seller' : 'std';
+  if ($('gwSelect').value !== k) $('gwSelect').value = k === 'seller' ? 'seller' : 'std';
+  $('app').classList.toggle('gw-seller', GW_KIND === 'seller');
+  $('drawer').classList.toggle('gw-seller', GW_KIND === 'seller');
+  if (GW_KIND === 'seller') setAddMode('single');
+  $('renewBannerCh').style.display = GW_KIND === 'seller' && RENEW_FAIL ? 'block' : 'none';
+  applySellerLimit(); reloadPage();
+}
+function markImported() { if (GW_KIND !== 'seller' || !SELLER_IMPORTED) return; ROWS.forEach((r, i) => { r.imported = i % 3 === 1; }); renderAll(); }
+function applySellerLimit() {
+  const full = GW_KIND === 'seller' && SELLER_FULL, b = $('addBtn');
+  b.disabled = full; $('addWrap').toggleAttribute('data-tip', full); if (full) $('addWrap').setAttribute('data-tip', '已达站点上限');
+  $('chSub').textContent = GW_KIND === 'seller' ? `供应商账号 ainow-seller · 渠道 ${SELLER_FULL ? SELLER_LIMIT : 18} / 上限 ${SELLER_LIMIT}（按站点设置，实时读取 max_channels）· 服务端分页 20 条/页` : (ROLE === 'admin' ? '所有通过上号器添加的渠道 · 服务端分页 20 条/页' : '仅显示你通过上号器添加的渠道 · 服务端分页 20 条/页');
+}
+function setSellerLimit(v) { SELLER_FULL = v; applySellerLimit(); }
+function setRenewFail(v) { RENEW_FAIL = v; $('renewBannerCh').style.display = GW_KIND === 'seller' && v ? 'block' : 'none'; const sb = $('renewBannerSet'); if (sb) sb.style.display = v ? 'block' : 'none'; renderGws(); }
+function runImport() {
+  const first = !SELLER_IMPORTED; SELLER_IMPORTED = true;
+  const imp = first ? 12 : 0, skip = first ? 4 : 16, fail = first ? 2 : 2;
+  $('imSum').innerHTML = `<div><span>导入</span><b style="color:#1F9D45">${imp}</b></div><div><span>跳过（已导入）</span><b>${skip}</b></div><div><span>失败</span><b style="color:#D92D20">${fail}</b></div>`;
+  const fails = [['#5521 ainow-gem-2', '站点返回：channel not owned by seller'], ['#5530 ainow-old', '站点返回：渠道读取超时（10s），可再次导入重试']];
+  $('imList').style.display = 'block';
+  $('imList').innerHTML = `<table><thead><tr><th>渠道</th><th>结果</th><th>说明</th></tr></thead><tbody>${fails.map(f => `<tr><td class="num">${f[0]}</td><td><span class="st st-auto">失败</span></td><td class="muted site-msg">${f[1]}</td></tr>`).join('')}${first ? '<tr><td class="num">#5512 ainow-c3</td><td><span class="st st-auto">自动禁用</span></td><td class="muted">已导入，保持站点上的自动禁用状态不变</td></tr>' : ''}</tbody></table>`;
+  closeModals(); $('modalImport').classList.add('show'); markImported();
+}
+// 抽屉 Base URL：站点拒绝时原样显示站点返回的错误
+function sellerUrlReject(msg) { const e = $('dUrlSiteErr'); e.textContent = msg; e.style.display = 'block'; $('dUrlWrap').classList.add('error'); }
+// ---- 网关抽屉：类型切换、测试连接必做、自动续期 ----
+let GW_FORM = 'std', GW_TESTED = false;
+function setGwFormKind(k) {
+  GW_FORM = k; $('gwDrawer').classList.toggle('k-seller', k === 'seller');
+  document.querySelectorAll('#gwKindSeg button').forEach(b => b.classList.toggle('active', b.dataset.k === k));
+  gwFormChanged();
+}
+function gwFormChanged() {
+  GW_TESTED = false; const seller = GW_FORM === 'seller';
+  $('gwSaveBtn').disabled = seller; $('gwSaveBtn').title = seller ? '请先测试连接' : '';
+  $('gwRenew').innerHTML = '<span class="muted">令牌自动续期：测试连接成功后开启</span>';
+  if (seller) $('gwFoot').innerHTML = '<span class="muted">供应商账号必须先测试连接</span>';
+}
+
+
+/* ===== v2.2 对账：供应商账号网关直接显示账单视图（每日 0:00 快照差），无一致 / 差异状态 ===== */
+const SNAP_DAYS = ['10-24', '10-25', '10-26', '10-27', '10-28', '10-29', '10-30'];
+const SNAP_ROWS = [
+  { n: 'ainow-01', v: [48.2, 51.0, 47.9, 55.3, null, 49.8, 52.3] },
+  { n: 'ainow-02', imp: true, impAt: '10-27 15:20', v: [undefined, undefined, undefined, undefined, 17.2, 19.4, 18.75] },
+  { n: 'ainow-03', v: [12.1, 0, 9.8, 11.4, 10.2, 13.0, null] },
+  { n: 'ainow-c3', imp: true, impAt: '10-27 15:20', auto: true, v: [undefined, undefined, undefined, undefined, 0, 0, 0] },
+];
+let RECON_GW = 'std';
+function setReconGw(k) {
+  RECON_GW = k; $('reconGw').value = k; const seller = k === 'seller';
+  $('reconSeller').style.display = seller ? '' : 'none'; $('reconOrig').style.display = seller ? 'none' : '';
+  $('reconDone').style.display = seller ? 'none' : '';
+  $('reconSub').textContent = seller ? 'ainow-seller · 供应商账号 · 按每日 0:00 快照差计费 · 最近 7 天' : '账期 2026-10-18 · 账单发布后自动核对 · 完成于 2026-10-19 03:47';
+  if (seller) renderSnap();
+}
+function renderSnap() {
+  $('snapHead').innerHTML = `<tr><th>渠道</th>${SNAP_DAYS.map(d => `<th class="r">${d}</th>`).join('')}<th class="r">7 日合计</th></tr>`;
+  $('snapBody').innerHTML = SNAP_ROWS.map(r => {
+    const tot = r.v.filter(x => typeof x === 'number').reduce((a, b) => a + b, 0);
+    return `<tr><td>${r.n}${r.imp ? `<span class="pill pill-imp" data-tip="${r.impAt} 导入，从之后第一个 0:00 快照开始计费">导入</span>` : ''}${r.auto ? '<span class="st st-auto" style="margin-left:6px">自动禁用</span>' : ''}</td>${r.v.map(x => x === undefined ? '<td class="r muted" data-tip="导入前，不计费">—</td>' : x === null ? '<td class="r miss" data-tip="该日缺少 0:00 快照：不记为 0，也不按平均值补">缺数据</td>' : `<td class="r num">${fmt(x)}</td>`).join('')}<td class="r num"><b>${fmt(tot)}</b>${r.v.includes(null) ? '<span class="sub2">不含缺数据日</span>' : ''}</td></tr>`;
+  }).join('');
+}
+
 /* ===== 设置 · 网关 / 保存栏 ===== */
 const GWS = [
   { name: 'gw-demo-1', url: 'https://gw1.example.com', tok: 'sk-fake-gw1-0000000000003f9a', st: 'ok', ch: 137, sync: '2 分钟前', color: 'blue', on: true },
   { name: 'gw-demo-2', url: 'https://gw2.example.com', tok: 'sk-fake-gw2-000000000000b71c', st: 'bad', ch: 24, sync: '今天 03:42', color: 'orange', on: true },
+  { name: 'ainow-seller', url: 'https://ainow.example.com', tok: 'acct-seller_demo', st: 'ok', ch: 18, sync: '5 分钟前', color: 'teal', on: true, seller: true },
   { name: 'gw-legacy', url: 'https://old-gw.example.com', tok: 'sk-fake-gw3-000000000000e05d', st: 'ok', ch: 0, sync: '2026-10-12 21:08', color: 'purple', on: false },
 ];
 const GW_SHOW = new Set();
-const maskTok = t => 'sk-••••' + t.slice(-4);
+const maskTok = t => t.startsWith('acct-') ? '账号 ' + t.slice(5) : 'sk-••••' + t.slice(-4);
 function renderGws() {
   $('gwList').innerHTML = GWS.map((g, i) => `<div class="gw-row ${g.on ? '' : 'off'}">
     <div class="blob blob-squircle blob-${g.color}"></div>
-    <div class="gw-main"><div><b>${g.name}</b>${!g.on ? '<span class="pill pill-muted">已停用</span>' : g.st === 'ok' ? '<span class="rs rs-ok">已连接</span>' : '<span class="rs rs-bad" data-tip="管理令牌返回 401，请更新令牌">令牌失效</span>'}</div>
+    <div class="gw-main"><div><b>${g.name}</b>${g.seller ? '<span class="gw-kind">供应商账号</span>' + (RENEW_FAIL ? '<span class="rs rs-pend" data-tip="10-31 11:40 续期失败：账号或密码错误">续期失败</span>' : '<span class="rs rs-ok" data-tip="令牌剩余不足 60 秒时自动续期">自动续期</span>') : ''}${!g.on ? '<span class="pill pill-muted">已停用</span>' : g.st === 'ok' ? '<span class="rs rs-ok">已连接</span>' : '<span class="rs rs-bad" data-tip="管理令牌返回 401，请更新令牌">令牌失效</span>'}</div>
       <div class="gw-meta"><span>${g.url}</span><span class="gw-tok">${GW_SHOW.has(i) ? g.tok : maskTok(g.tok)}<button type="button" onclick="toggleGwTok(${i})">${GW_SHOW.has(i) ? '隐藏' : '显示'}</button></span><span>渠道 <b class="num" style="font-weight:600;color:var(--text-secondary)">${g.ch}</b></span><span>上次同步 ${g.sync}</span></div></div>
     <div class="gw-ops"><button class="btn btn-ghost btn-xs" type="button" onclick="gwRowTest(${i})"><span class="ico-play"></span>测试连接</button><button class="btn btn-ghost btn-xs" type="button" onclick="openGwDrawer(${i})">编辑</button>
       <button class="btn btn-ghost btn-xs ${g.on ? 'text-danger' : ''}" type="button" onclick="toggleGw(${i})">${g.on ? '停用' : '启用'}</button></div></div>`).join('');
@@ -2542,17 +2676,31 @@ function toggleGw(i) {
   confirmDlg({ title: `停用网关「${g.name}」？`, sub: `停用后不再拉取该网关的 ${g.ch} 个渠道，也无法在其上增删渠道。`, okText: '停用', danger: true, onOk: () => { g.on = false; renderGws(); toast(`已停用「${g.name}」`); } });
 }
 let GW_EDIT = null;
-function openGwDrawer(i) {
+function openGwDrawer(i, kind) {
+  setGwFormKind(kind || (i != null && GWS[i] && GWS[i].seller ? 'seller' : 'std'));
   GW_EDIT = i == null ? null : i; const g = i == null ? null : GWS[i];
   $('gwTitle').textContent = g ? `编辑网关 · ${g.name}` : '添加网关';
   $('gwName').value = g ? g.name : 'gw-demo-3'; $('gwUrl').value = g ? g.url : 'https://gw3.example.com/v1'; $('gwTok').value = ''; $('gwTok').placeholder = g ? '留空表示不修改（当前 ' + maskTok(g.tok) + '）' : '系统访问令牌';
-  $('gwFoot').textContent = ''; gwUrlCheck();
+  $('gwFoot').textContent = ''; gwUrlCheck(); if (GW_FORM === 'seller') { $('gwUrl').value = g ? g.url : 'https://ainow.example.com'; $('gwAcct').value = g ? 'seller_demo' : ''; $('gwPwd').value = ''; if (!g) $('gwName').value = 'ainow-seller'; gwUrlCheck(); gwFormChanged(); }
   $('gwBg').classList.add('show'); $('gwDrawer').classList.add('show');
 }
 function closeGwDrawer() { $('gwBg').classList.remove('show'); $('gwDrawer').classList.remove('show'); }
 function gwUrlCheck() { const bad = /\/v1\/?$/.test($('gwUrl').value.trim()); $('gwUrlWarn').classList.toggle('show', bad); $('gwUrlWrap').classList.toggle('warn', bad); }
-function gwTest() { $('gwFoot').innerHTML = '<span class="spin on"></span> 正在测试…'; setTimeout(() => { $('gwFoot').innerHTML = '<span class="tr tr-ok">已连接 · 230ms</span>'; }, 800); }
+function gwTest() {
+  if (GW_FORM === 'seller') {
+    $('gwFoot').innerHTML = '<span class="spin on"></span> 正在登录站点…';
+    setTimeout(() => { GW_TESTED = true; $('gwSaveBtn').disabled = false; $('gwSaveBtn').title = '';
+      $('gwFoot').innerHTML = '<span class="tr tr-ok">已登录 · 320ms</span>';
+      $('gwRenew').innerHTML = '<span class="rs rs-ok">自动续期 已开启</span><span class="muted">令牌有效期至 10-31 14:18 · 剩余不足 60 秒时自动续期 · 渠道上限按站点设置（max_channels）</span>'; }, 900);
+    return;
+  } $('gwFoot').innerHTML = '<span class="spin on"></span> 正在测试…'; setTimeout(() => { $('gwFoot').innerHTML = '<span class="tr tr-ok">已连接 · 230ms</span>'; }, 800); }
 function gwSave() {
+  if (GW_FORM === 'seller') {
+    if (!GW_TESTED) { toast('请先测试连接'); return; }
+    if (!$('gwUrl').value.trim() || !$('gwAcct').value.trim() || !$('gwPwd').value) { toast('请填写站点地址、账号和密码'); return; }
+    GWS.push({ name: $('gwName').value.trim() || 'ainow-seller', url: $('gwUrl').value.trim(), tok: 'acct-' + $('gwAcct').value.trim(), st: 'ok', ch: 18, sync: '刚刚', color: 'teal', on: true, seller: true });
+    closeGwDrawer(); renderGws(); toast('已添加供应商账号网关'); return;
+  }
   const n = $('gwName').value.trim(), u = $('gwUrl').value.trim(), t = $('gwTok').value.trim();
   if (!n || !u || (GW_EDIT == null && !t)) { toast('请填写必填项：' + [!n && '名称', !u && '站点地址', GW_EDIT == null && !t && '管理令牌'].filter(Boolean).join('、')); return; }
   if (GW_EDIT == null) GWS.push({ name: n, url: u, tok: t, st: 'ok', ch: 0, sync: '尚未同步', color: 'teal', on: true });
@@ -2589,6 +2737,16 @@ renderGws(); snapSettings();
     if (h[2] === 'confirm') askToggle(ROWS[0].id);
     if (h[2] && ['pending', 'loading', 'empty'].includes(h[2])) setBillState(h[2]);
     if (h[2] === 'supplier') setReconTab('supplier');
+    if (h[1] === 'recon' && h[2] === 'seller') setReconGw('seller');
+    if (h[1] === 'channels' && h[2] && h[2].startsWith('seller')) {
+      setGwKind('seller');
+      if (h[2] === 'seller-full') setSellerLimit(true);
+      if (h[2] === 'seller-renewfail') setRenewFail(true);
+      if (h[2] === 'seller-drawer') { setTimeout(() => { openDrawer(); $('dUrl').value = 'https://relay.example.com'; validateUrl(); sellerUrlReject('站点返回：base_url not allowed for seller channel (allowed: https://api.anthropic.com, https://api.openai.com)'); }, 500); }
+      if (h[2] === 'seller-import') setTimeout(runImport, 500);
+    }
+    if (h[1] === 'settings' && h[2] === 'gw-seller') setTimeout(() => { openGwDrawer(null, 'seller'); $('gwAcct').value = 'seller_demo'; $('gwPwd').value = 'fake-password'; gwTest(); }, 300);
+    if (h[1] === 'settings' && h[2] === 'renewfail') setRenewFail(true);
     if (h[2] === 'dirty') { $('rlGlobal').value = 90; validateRate(); checkDirty(); }
   }
 })();

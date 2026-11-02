@@ -52,7 +52,24 @@ const SCHEMA = [
     admin_user_id TEXT NOT NULL,
     demo INTEGER NOT NULL DEFAULT 0,
     created_at INTEGER NOT NULL,
-    updated_at INTEGER NOT NULL
+    updated_at INTEGER NOT NULL,
+    kind TEXT NOT NULL DEFAULT 'newapi_admin',
+    username TEXT NOT NULL DEFAULT '',
+    password_cipher TEXT NOT NULL DEFAULT '',
+    refresh_cookie_cipher TEXT NOT NULL DEFAULT '',
+    session_sid_cipher TEXT NOT NULL DEFAULT '',
+    access_token_cipher TEXT NOT NULL DEFAULT '',
+    access_expires_at INTEGER,
+    seller_user_id TEXT NOT NULL DEFAULT '',
+    auth_status TEXT NOT NULL DEFAULT '',
+    auth_error TEXT NOT NULL DEFAULT '',
+    auth_checked_at INTEGER,
+    owner_user_id TEXT,
+    can_write INTEGER NOT NULL DEFAULT 1,
+    can_toggle INTEGER NOT NULL DEFAULT 1,
+    can_edit_routing INTEGER NOT NULL DEFAULT 0,
+    max_channels INTEGER NOT NULL DEFAULT 0,
+    site_channel_total INTEGER NOT NULL DEFAULT 0
   )`,
   `CREATE TABLE IF NOT EXISTS app_settings (
     key TEXT PRIMARY KEY,
@@ -261,6 +278,11 @@ const SCHEMA = [
     created_at INTEGER NOT NULL
   )`,
   `CREATE INDEX IF NOT EXISTS recon_adjustments_channel ON recon_adjustments(bill_day, channel_id)`,
+  `CREATE TABLE IF NOT EXISTS seller_login_attempts (
+    gateway_key TEXT NOT NULL,
+    attempted_at INTEGER NOT NULL
+  )`,
+  `CREATE INDEX IF NOT EXISTS seller_login_attempts_key ON seller_login_attempts(gateway_key, attempted_at)`,
   `CREATE TABLE IF NOT EXISTS sessions (
     id TEXT PRIMARY KEY,
     user_id TEXT NOT NULL,
@@ -449,8 +471,32 @@ export async function ensureReady(): Promise<void> {
       await addMissingColumns(db, "users", [["locale", "TEXT"]]);
       await addMissingColumns(db, "billing_rows", [["binding_id", "TEXT"]]);
       await addMissingColumns(db, "recon_rows", [["binding_id", "TEXT"]]);
-      await addMissingColumns(db, "gateways", [["disabled", "INTEGER NOT NULL DEFAULT 0"]]);
-      await addMissingColumns(db, "channels", [["missing_handled", "INTEGER NOT NULL DEFAULT 0"]]);
+      await addMissingColumns(db, "gateways", [
+        ["disabled", "INTEGER NOT NULL DEFAULT 0"],
+        ["kind", "TEXT NOT NULL DEFAULT 'newapi_admin'"],
+        ["username", "TEXT NOT NULL DEFAULT ''"],
+        ["password_cipher", "TEXT NOT NULL DEFAULT ''"],
+        ["refresh_cookie_cipher", "TEXT NOT NULL DEFAULT ''"],
+        ["session_sid_cipher", "TEXT NOT NULL DEFAULT ''"],
+        ["access_token_cipher", "TEXT NOT NULL DEFAULT ''"],
+        ["access_expires_at", "INTEGER"],
+        ["seller_user_id", "TEXT NOT NULL DEFAULT ''"],
+        ["auth_status", "TEXT NOT NULL DEFAULT ''"],
+        ["auth_error", "TEXT NOT NULL DEFAULT ''"],
+        ["auth_checked_at", "INTEGER"],
+        ["owner_user_id", "TEXT"],
+        ["can_write", "INTEGER NOT NULL DEFAULT 1"],
+        ["can_toggle", "INTEGER NOT NULL DEFAULT 1"],
+        ["can_edit_routing", "INTEGER NOT NULL DEFAULT 0"],
+        ["max_channels", "INTEGER NOT NULL DEFAULT 0"],
+        ["site_channel_total", "INTEGER NOT NULL DEFAULT 0"],
+      ]);
+      await addMissingColumns(db, "channels", [
+        ["missing_handled", "INTEGER NOT NULL DEFAULT 0"],
+        ["origin", "TEXT NOT NULL DEFAULT 'created'"],
+        ["imported_at", "INTEGER"],
+      ]);
+      await addMissingColumns(db, "billing_rows", [["billing_mode", "TEXT NOT NULL DEFAULT ''"]]);
       await db.exec(
         `INSERT INTO channel_bindings (id, record_id, gateway_id, newapi_channel_id, bound_at, reason, bind_snapshot)
          SELECT 'seed-' || id, id, gateway_id, upstream_id, created_at, 'seed', COALESCE(create_baseline, used_quota)

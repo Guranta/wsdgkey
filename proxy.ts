@@ -85,7 +85,7 @@ export async function proxy(request: NextRequest) {
 
   const adminApi =
     pathname.startsWith("/api/admin") ||
-    pathname.startsWith("/api/gateways") ||
+    pathname === "/api/gateways/demo" ||
     pathname.startsWith("/api/settings");
   if (adminApi && user?.role !== "admin") {
     return withSecurity(NextResponse.json({ error: { message: message(spoken, "forbidden") } }, { status: 403, headers: { "cache-control": "no-store" } }));

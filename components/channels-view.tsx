@@ -5,10 +5,28 @@ import { useConnections } from "@/components/providers";
 import { Alert, accentIndex, buttonClass, Card, ConfirmDialog, PageHeader, useIsClient } from "@/components/ui";
 import { CHANNEL_ID_SEARCH_CAP, parseChannelKeyword, type ChannelSort } from "@/lib/channel-query";
 import { formatQuota, formatTimestamp } from "@/lib/format";
+import { formatShanghaiTime } from "@/lib/shanghai";
 import { useLocale, useTranslations } from "next-intl";
 import { useEffect, useMemo, useState } from "react";
 
-type GatewayOption = { id: string; name: string; demo: boolean; baseUrl?: string; disabled?: boolean };
+type GatewayOption = {
+  id: string;
+  name: string;
+  demo: boolean;
+  baseUrl?: string;
+  disabled?: boolean;
+  kind?: "newapi_admin" | "newapi_seller";
+  canWrite?: boolean;
+  canToggle?: boolean;
+  maxChannels?: number;
+  siteChannelTotal?: number;
+  authStatus?: string;
+  authError?: string;
+  authCheckedAt?: number | null;
+  accessExpiresAt?: number | null;
+};
+type SellerCap = { canWrite: boolean; canToggle: boolean; maxChannels: number; total: number };
+type ImportResult = { imported: number; skipped: number; failed: number; failures: { id: number; name: string; reason: string }[]; keptAutoDisabled: number };
 type Creator = { id: string; name: string; username: string };
 type ChannelItem = DrawerChannel & {
   upstreamId: number;
@@ -32,6 +50,7 @@ type ChannelItem = DrawerChannel & {
   autoDisableReason: string;
   createdHere: boolean;
   upstreamMissing: boolean;
+  origin?: "created" | "imported";
 };
 
 type Counts = { all: number; enabled: number; running: number; manual: number; auto: number; disabled: number; anomaly: number };
@@ -95,6 +114,7 @@ export function ChannelsView() {
   const { ready, user } = useConnections();
   const hydrated = useIsClient();
   const t = useTranslations("channels");
+  const settingsT = useTranslations("settings");
   const common = useTranslations("common");
   const errors = useTranslations("errors");
   const locale = useLocale();
@@ -117,6 +137,9 @@ export function ChannelsView() {
   const [loadError, setLoadError] = useState("");
   const [notice, setNotice] = useState("");
   const [selected, setSelected] = useState<string[]>([]);
+  const [cap, setCap] = useState<SellerCap | null>(null);
+  const [importing, setImporting] = useState(false);
+  const [importResult, setImportResult] = useState<ImportResult | null>(null);
   const [nameBook, setNameBook] = useState<Record<string, string>>({});
   const [drawer, setDrawer] = useState<"add" | ChannelItem | null>(null);
   const [confirm, setConfirm] = useState<{ ids: string[]; enabled: boolean; names: string[] } | null>(null);
@@ -186,6 +209,41 @@ export function ChannelsView() {
     };
   }, [ready, query, tick, bump, errors, t]);
 
+  const selectedGateway = data?.gateways.find((item) => item.id === gateway);
+  const sellerGateway = selectedGateway?.kind === "newapi_seller";
+  const liveCap = sellerGateway ? cap : null;
+  const atLimit = Boolean(liveCap && liveCap.maxChannels > 0 && liveCap.total >= liveCap.maxChannels);
+  const canToggle = !sellerGateway || liveCap?.canToggle !== false;
+
+  useEffect(() => {
+    if (!sellerGateway || !gateway) return;
+    let cancelled = false;
+    void fetch(`/api/channels/seller-cap?gateway=${encodeURIComponent(gateway)}`, { cache: "no-store" })
+      .then(async (res) => {
+        if (!res.ok || cancelled) return;
+        setCap((await res.json()) as SellerCap);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [sellerGateway, gateway, bump]);
+
+  async function runImport() {
+    if (!gateway) return;
+    setImporting(true);
+    setError("");
+    const res = await fetch("/api/channels/import", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ gatewayId: gateway }) });
+    setImporting(false);
+    const body = (await res.json().catch(() => null)) as (ImportResult & { error?: { message?: string } }) | null;
+    if (!res.ok || !body) {
+      setError(known(errors, body?.error?.message, errors("channelsSaveFailed")));
+      return;
+    }
+    setImportResult(body);
+    setBump((value) => value + 1);
+  }
+
   function describeTests(tests: TestBody[] | undefined): string {
     if (!tests?.length) return "";
     if (tests.length === 1) {
@@ -198,7 +256,7 @@ export function ChannelsView() {
     return t("testSummary", { ok, fail: tests.length - ok });
   }
 
-  async function saveDrawer(body: Record<string, unknown>) {
+  async function saveDrawer(body: Record<string, unknown>): Promise<string | void> {
     setBusy(true);
     setError("");
     const editing = drawer && drawer !== "add" ? drawer : null;
@@ -208,14 +266,20 @@ export function ChannelsView() {
       body: JSON.stringify(body),
     });
     setBusy(false);
-    const payload = (await res.json().catch(() => null)) as { error?: { message?: string }; message?: string; pending?: boolean; tests?: TestBody[]; duplicateKeys?: number } | null;
+    const payload = (await res.json().catch(() => null)) as { error?: { message?: string; field?: string }; message?: string; pending?: boolean; tests?: TestBody[]; duplicateKeys?: number; created?: number; failed?: number; failureReasons?: { reason: string }[] } | null;
     if (!res.ok && res.status !== 202) {
-      setError(known(errors, payload?.error?.message, errors("channelsSaveFailed")));
+      const message = payload?.error?.message || errors("channelsSaveFailed");
+      if (payload?.error?.field === "base_url") return message;
+      setError(known(errors, message, message));
       return;
     }
     const tests = describeTests(payload?.tests);
     const dupes = payload?.duplicateKeys ? t("duplicateKeys", { count: payload.duplicateKeys }) : "";
-    setNotice(payload?.pending ? known(errors, payload.message, errors("upstreamBusy")) : t("saved", { detail: `${tests}${dupes}` }));
+    const batch = typeof payload?.failed === "number" && (payload.failed > 0 || (payload.created ?? 0) > 1)
+      ? t("batchSummary", { ok: payload.created ?? 0, fail: payload.failed })
+      : "";
+    const reasons = payload?.failureReasons?.length ? t("batchReasons", { reasons: payload.failureReasons.map((item) => item.reason).join(locale === "zh-CN" ? "；" : "; ") }) : "";
+    setNotice(payload?.pending ? known(errors, payload.message, errors("upstreamBusy")) : [t("saved", { detail: `${tests}${dupes}` }), batch, reasons].filter(Boolean).join(" · "));
     setDrawer(null);
     setPage(1);
     setBump((value) => value + 1);
@@ -312,8 +376,18 @@ export function ChannelsView() {
     <div>
       <PageHeader
         title={t("title")}
-        description={user?.role === "supplier" ? t("supplierDescription") : t("description")}
+        description={sellerGateway && selectedGateway ? (liveCap && liveCap.maxChannels > 0 ? t("sellerSubtitle", { name: selectedGateway.name, count: liveCap.total, max: liveCap.maxChannels }) : t("sellerSubtitleOpen", { name: selectedGateway.name, count: liveCap?.total ?? selectedGateway.siteChannelTotal ?? 0 })) : user?.role === "supplier" ? t("supplierDescription") : t("description")}
       />
+      {sellerGateway && selectedGateway?.authStatus === "failed" ? (
+        <div className="mb-4 rounded-control bg-warn-soft px-4 py-3 text-sm leading-5 break-words text-warn">
+          {settingsT("renewalBanner", {
+            name: selectedGateway.name,
+            when: formatShanghaiTime(selectedGateway.authCheckedAt, locale),
+            detail: selectedGateway.authError || "—",
+            expires: formatShanghaiTime(selectedGateway.accessExpiresAt, locale),
+          })}
+        </div>
+      ) : null}
       {error ? <div className="mb-4"><Alert tone="danger">{error}</Alert></div> : null}
       {notice ? <div className="mb-4"><Alert tone="info">{notice}</Alert></div> : null}
       {loadError && data ? (
@@ -340,9 +414,10 @@ export function ChannelsView() {
                   return <option key={item.id} value={item.id}>{item.name}{host ? ` · ${host}` : ""}{item.demo ? ` · ${common("demo")}` : ""}</option>;
                 })}
               </select>
-              <span title={gateway ? undefined : t("addDisabledTip")}>
-                <button type="button" className={buttonClass("primary", "h-9")} onClick={() => setDrawer("add")} disabled={!gateway}>{t("add")}</button>
+              <span title={!gateway ? t("addDisabledTip") : atLimit ? t("atSiteLimit") : undefined}>
+                <button type="button" className={buttonClass("primary", "h-9")} onClick={() => setDrawer("add")} disabled={!gateway || atLimit || (sellerGateway && liveCap?.canWrite === false)}>{t("add")}</button>
               </span>
+              {sellerGateway ? <button type="button" className={buttonClass("secondary", "h-9")} disabled={importing || !gateway} onClick={() => void runImport()}>{importing ? t("loading") : t("importExisting")}</button> : null}
               <div className="ml-auto">
                 <button type="button" className={buttonClass("ghost", "h-9 text-sm")} onClick={() => setFiltersOpen((value) => !value)}>{filtersOpen ? t("collapse") : t("filtersCollapsed")}</button>
               </div>
@@ -381,8 +456,8 @@ export function ChannelsView() {
           </Card>
           <div className={`mb-3 flex flex-wrap items-center gap-3 rounded-control bg-primary-soft px-4 py-2 text-sm ${selected.length ? "" : "hidden"}`}>
             <span className="font-medium">{t("selected", { count: selected.length })}</span>
-            <button type="button" className="font-medium" onClick={() => setConfirm({ ids: selected, enabled: true, names: selectedNames })}>{t("bulkEnable")}</button>
-            <button type="button" className="font-medium" onClick={() => setConfirm({ ids: selected, enabled: false, names: selectedNames })}>{t("bulkDisable")}</button>
+            {canToggle ? <button type="button" className="whitespace-nowrap font-medium" onClick={() => setConfirm({ ids: selected, enabled: true, names: selectedNames })}>{t("bulkEnable")}</button> : null}
+            {canToggle ? <button type="button" className="whitespace-nowrap font-medium" onClick={() => setConfirm({ ids: selected, enabled: false, names: selectedNames })}>{t("bulkDisable")}</button> : null}
             <button type="button" className="text-secondary" onClick={() => setSelected([])}>{t("clear")}</button>
             <span className="text-xs text-muted">{t("pageOnly")}</span>
           </div>
@@ -432,7 +507,12 @@ export function ChannelsView() {
                       <tr key={item.id} className="group border-t border-line hover:bg-hover">
                         <td className="px-4 py-3.5"><input type="checkbox" checked={selected.includes(item.id)} onChange={(event) => setSelected((current) => event.target.checked ? [...current, item.id] : current.filter((id) => id !== item.id))} aria-label={t("selectRow", { name: item.name })} /></td>
                         <td className="whitespace-nowrap px-4 py-3.5 font-mono text-[13px] text-muted">#{item.upstreamId}</td>
-                        <td className="whitespace-nowrap px-4 py-3.5 font-medium">{item.name}</td>
+                        <td className="whitespace-nowrap px-4 py-3.5 font-medium">
+                          <span className="inline-flex items-center gap-2">
+                            {item.name}
+                            {item.origin === "imported" ? <span className="whitespace-nowrap rounded-full bg-input px-2 py-0.5 text-xs font-normal text-muted">{t("importedTag")}</span> : null}
+                          </span>
+                        </td>
                         <td className="whitespace-nowrap px-4 py-3.5">
                           <span className="inline-flex items-center gap-2 text-sm">
                             <FamilyAvatar type={item.type} name={item.typeName} />
@@ -468,7 +548,7 @@ export function ChannelsView() {
                           <div className="flex justify-end gap-0.5 opacity-70 transition group-hover:opacity-100 group-focus-within:opacity-100">
                             <button type="button" className={buttonClass("ghost", "h-7 px-2 text-xs")} onClick={() => void testOne(item.id)}>{t("test")}</button>
                             <button type="button" className={buttonClass("ghost", "h-7 px-2 text-xs")} onClick={() => setDrawer(item)}>{t("edit")}</button>
-                            <button type="button" className={buttonClass("ghost", "h-7 px-2 text-xs")} onClick={() => setConfirm({ ids: [item.id], enabled: item.status !== "enabled", names: [`#${item.upstreamId} ${item.name}`] })}>{item.status === "enabled" ? t("disable") : t("enable")}</button>
+                            {canToggle ? <button type="button" className={buttonClass("ghost", "h-7 px-2 text-xs")} onClick={() => setConfirm({ ids: [item.id], enabled: item.status !== "enabled", names: [`#${item.upstreamId} ${item.name}`] })}>{item.status === "enabled" ? t("disable") : t("enable")}</button> : null}
                             {user?.role === "admin" && item.upstreamMissing ? <button type="button" className={buttonClass("ghost", "h-7 px-2 text-xs")} onClick={() => { setRebind(item); setRebindId(""); }}>{t("rebind")}</button> : null}
                           </div>
                           <div className="mt-0.5 max-w-64 truncate text-right text-xs text-muted" title={testText(item)}>{testText(item)}</div>
@@ -498,6 +578,7 @@ export function ChannelsView() {
           key={drawer === "add" ? "add" : drawer.id}
           gatewayId={gateway}
           editing={drawer === "add" ? null : drawer}
+          seller={sellerGateway}
           busy={busy}
           onClose={() => setDrawer(null)}
           onSave={saveDrawer}
@@ -524,7 +605,7 @@ export function ChannelsView() {
       {bulk ? (
         <div className="fixed inset-0 z-50 flex items-end justify-center bg-foreground/35 p-4 sm:items-center">
           <div className="w-full max-w-[560px] rounded-[20px] border border-line bg-card p-5 shadow-sm" role="dialog" aria-labelledby="bulk-summary-title">
-            <h2 id="bulk-summary-title" className="text-lg font-semibold">{bulk.enabled ? t("bulkEnableDone") : t("bulkDisableDone")}</h2>
+            <h2 id="bulk-summary-title" className="text-lg font-semibold break-words">{bulk.enabled ? t("bulkEnableDone") : t("bulkDisableDone")}{sellerGateway ? t("oneByOne") : ""}</h2>
             <div className="mt-4 grid grid-cols-3 gap-2 text-center">
               <div className="rounded-control bg-ok-soft px-2 py-3"><div className="text-xs text-secondary">{t("bulkOk")}</div><div className="text-2xl font-semibold text-ok">{bulk.ok}</div></div>
               <div className="rounded-control bg-danger-soft px-2 py-3"><div className="text-xs text-secondary">{t("bulkFail")}</div><div className="text-2xl font-semibold text-danger">{bulk.fail}</div></div>
@@ -573,6 +654,28 @@ export function ChannelsView() {
               <button type="submit" className={buttonClass("primary")} disabled={busy || !/^\d+$/.test(rebindId)}>{t("rebind")}</button>
             </div>
           </form>
+        </div>
+      ) : null}
+      {importResult ? (
+        <div className="fixed inset-0 z-50 flex items-end justify-center bg-foreground/35 p-4 sm:items-center">
+          <div className="w-full max-w-lg rounded-[20px] border border-line bg-card p-5" role="dialog" aria-labelledby="import-summary-title">
+            <h2 id="import-summary-title" className="text-lg font-semibold break-words">{t("importDone")}</h2>
+            <div className="mt-4 grid grid-cols-1 gap-2 text-center sm:grid-cols-3">
+              <div className="min-w-0 rounded-control bg-ok-soft px-2 py-3"><div className="break-words text-xs leading-4 text-secondary">{t("importCount", { count: importResult.imported })}</div><div className="text-2xl font-semibold text-ok">{importResult.imported}</div></div>
+              <div className="min-w-0 rounded-control bg-input px-2 py-3"><div className="break-words text-xs leading-4 text-secondary">{t("skipCount", { count: importResult.skipped })}</div><div className="text-2xl font-semibold">{importResult.skipped}</div></div>
+              <div className="min-w-0 rounded-control bg-danger-soft px-2 py-3"><div className="break-words text-xs leading-4 text-secondary">{t("failCount", { count: importResult.failed })}</div><div className="text-2xl font-semibold text-danger">{importResult.failed}</div></div>
+            </div>
+            {importResult.failures.length ? (
+              <ul className="mt-4 max-h-40 space-y-1 overflow-auto text-xs leading-5 break-words">
+                {importResult.failures.map((item) => <li key={item.id}>{t("importFailedItem", { id: item.id, name: item.name, reason: item.reason })}</li>)}
+              </ul>
+            ) : null}
+            {importResult.keptAutoDisabled > 0 ? <p className="mt-3 text-xs leading-5 text-muted">{t("importKept")}</p> : null}
+            <div className="mt-5 flex flex-wrap justify-end gap-2">
+              <button type="button" className={buttonClass("secondary")} disabled={importing} onClick={() => void runImport()}>{t("importAgain")}</button>
+              <button type="button" className={buttonClass("primary")} onClick={() => setImportResult(null)}>{t("importFinish")}</button>
+            </div>
+          </div>
         </div>
       ) : null}
     </div>

@@ -1,7 +1,7 @@
 import { apiError, fromError } from "@/lib/api-error";
 import { queryChannels, createChannels } from "@/lib/channel-service";
 import { currentUser } from "@/lib/current-user";
-import { listGateways } from "@/lib/gateways";
+import { listVisibleGateways } from "@/lib/gateways";
 import { readJson } from "@/lib/http";
 
 export async function GET(req: Request) {
@@ -9,7 +9,23 @@ export async function GET(req: Request) {
   if (!user) return apiError("loginRequired", 401);
   const url = new URL(req.url);
   const result = await queryChannels(user, url.searchParams);
-  const gateways = (await listGateways()).map((item) => ({ id: item.id, name: item.name, demo: item.demo, baseUrl: item.baseUrl, disabled: item.disabled }));
+  const gateways = (await listVisibleGateways(user)).map((item) => ({
+    id: item.id,
+    name: item.name,
+    demo: item.demo,
+    baseUrl: item.baseUrl,
+    disabled: item.disabled,
+    kind: item.kind,
+    canWrite: item.canWrite,
+    canToggle: item.canToggle,
+    canEditRouting: item.canEditRouting,
+    maxChannels: item.maxChannels,
+    siteChannelTotal: item.siteChannelTotal,
+    authStatus: item.authStatus,
+    authError: item.authError,
+    authCheckedAt: item.authCheckedAt,
+    accessExpiresAt: item.accessExpiresAt,
+  }));
   return Response.json({ ...result, gateways }, { headers: { "cache-control": "no-store" } });
 }
 
