@@ -1,4 +1,4 @@
-import { Agent } from "undici";
+import { Agent, fetch as undiciFetch } from "undici";
 import { dbAll, dbRun } from "./db";
 import { scrubSecrets } from "./redact";
 import { decryptSecret, encryptSecret } from "./secret-box";
@@ -31,10 +31,14 @@ export function tlsExceptionFetcher(host: string | null | undefined): Fetcher {
   const target = String(host ?? "").trim().toLowerCase();
   if (!target) return fetch;
   if (!laxTlsAgent) laxTlsAgent = new Agent({ connect: { rejectUnauthorized: false } });
+  const agent = laxTlsAgent;
   const wrapped: Fetcher = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === "string" ? new URL(input) : input instanceof URL ? input : new URL(input.url);
     if (url.hostname.toLowerCase() !== target) return fetch(input, init);
-    return fetch(input, { ...init, dispatcher: laxTlsAgent } as RequestInit);
+    // 命中例外主机时整条请求走 npm undici 的 fetch + 同源 Agent；
+    // Node 内置 fetch 不认另一份 undici 的 dispatcher，会报 network 错。
+    const response = await undiciFetch(url.toString(), { ...init, dispatcher: agent } as Parameters<typeof undiciFetch>[1]);
+    return response as unknown as Response;
   }) as Fetcher;
   return wrapped;
 }
