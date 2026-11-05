@@ -133,3 +133,9 @@ export async function saveAppSettings(input: Partial<DeskSettings> & RateLimits)
   await writeSetting("recon_manual_tolerance_pct", String(manual));
   return { ...limits, siteName: name, testCooldownMin: minutes, quotaPerUnit: unit, reconTolerancePct: tolerance, zeroDays, manualTolerancePct: manual };
 }
+
+/** 计费源 C（供应商 JWT 站 customer_billing 快照）总开关，默认关：关时不跑快照、账单显示「源不可用」，禁止整页 $0。 */
+export async function supplierBillingEnabled(): Promise<boolean> {
+  const row = await readRaw("supplier_billing_enabled");
+  return String(row ?? "0") === "1";
+}

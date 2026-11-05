@@ -6,6 +6,7 @@ import { dbGet } from "./db";
 import { upstreamQueue } from "./rate-queue";
 import { rateLimits } from "./settings";
 import { formatShanghaiMidnight, nextShanghaiMidnight, shanghaiClock } from "./shanghai";
+import { runSupplierSnapshots } from "./supplier-billing";
 
 const pulling = new Set<string>();
 const pages = new Map<string, number>();
@@ -43,6 +44,7 @@ async function tick(): Promise<void> {
       }
     }
   }
+  await runSupplierSnapshots();
   const interval = Math.max(30_000, Number(process.env.SYNC_INTERVAL_MS ?? 300_000) || 300_000);
   const now = Date.now();
   if (now - lastListSync >= interval) {
