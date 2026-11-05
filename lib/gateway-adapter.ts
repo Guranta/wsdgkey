@@ -1,3 +1,4 @@
+import { dbGet, dbRun } from "./db";
 import type { GatewaySecret } from "./gateways";
 import { saveSellerCapabilities } from "./gateways";
 import { sellerChannelBody, readSellerCapabilities, type SellerCapabilities } from "./seller-payload";
@@ -25,7 +26,7 @@ export type ChannelPage = {
 };
 
 export type GatewayApi = {
-  kind: "newapi_admin" | "newapi_seller";
+  kind: "newapi_admin" | "newapi_seller" | "newapi_supplier";
   list(page: number): Promise<ChannelPage>;
   get(id: number): Promise<UpstreamChannel | null>;
   create(payload: Record<string, unknown>): Promise<void>;
@@ -137,5 +138,69 @@ function sellerApi(gateway: GatewaySecret): GatewayApi {
 }
 
 export function gatewayApi(gateway: GatewaySecret): GatewayApi {
+  if (gateway.kind === "newapi_supplier") return supplierApi(gateway);
   return gateway.kind === "newapi_seller" ? sellerApi(gateway) : adminApi(gateway);
+}
+
+export type SupplierProfileKind = { kind: string; label?: string; actions?: string[]; editable_fields?: string[]; models?: string[] };
+
+/** 每次同步重读 profile（能力随站点授权变化），缓存进 gateways.profile_cache 供界面用。 */
+export async function fetchSupplierProfile(gateway: GatewaySecret): Promise<{ supplierLabel: string; kinds: SupplierProfileKind[] }> {
+  const body = await queued(gateway, "list", () =>
+    sellerCall<{ supplier_label?: string; kinds?: unknown }>(gateway, "/api/supplier/v1/profile"),
+  );
+  const kinds = Array.isArray(body.kinds)
+    ? body.kinds.filter((item): item is SupplierProfileKind => Boolean(item) && typeof item === "object" && typeof (item as SupplierProfileKind).kind === "string")
+    : [];
+  const profile = { supplierLabel: String(body.supplier_label ?? ""), kinds };
+  await dbRun("UPDATE gateways SET profile_cache = ?, supplier_label = ? WHERE id = ?", [
+    JSON.stringify(profile),
+    profile.supplierLabel,
+    gateway.id,
+  ]).catch(() => undefined);
+  return profile;
+}
+
+/** 供应商 JWT 种类：只读列表 + owned=true 的受限编辑；测试/启停/删除在 API 层拒绝（CH-S-05/06/07）。 */
+function supplierApi(gateway: GatewaySecret): GatewayApi {
+  const forbidden = (action: string): never => {
+    throw Object.assign(new Error(`supplierForbidden:${action}`), { status: 403, retryable: false });
+  };
+  return {
+    kind: "newapi_supplier",
+    async list(page) {
+      const body = await queued(gateway, "list", () =>
+        sellerCall<{ data?: { items?: unknown[]; total?: number } }>(gateway, `/api/channel/?p=${page}&page_size=20&id_sort=true`),
+      );
+      const items = Array.isArray(body.data?.items) ? body.data.items.map(parseChannel).filter((item): item is UpstreamChannel => Boolean(item)) : [];
+      return { items, total: Number(body.data?.total ?? items.length), capabilities: null };
+    },
+    async get(id) {
+      const body = await queued(gateway, `channel:${id}`, () => sellerCall<{ data?: unknown }>(gateway, `/api/channel/${id}`));
+      return parseChannel(body.data);
+    },
+    async create(): Promise<void> {
+      return forbidden("create");
+    },
+    async update(payload) {
+      // 仅 owned=true 的本地渠道可改；字段裁剪由抽屉按 profile 的 editable_fields 做，这里兜底 owned
+      const channelId = String((payload as Record<string, unknown>)?.local_channel_id ?? "");
+      const row = channelId ? await dbGet("SELECT owned FROM channels WHERE id = ?", [channelId]) : null;
+      if (!row || Number(row.owned) !== 1) forbidden("update");
+      await queued(gateway, "mutate", () => sellerCall(gateway, "/api/channel/", { method: "PUT", body: JSON.stringify(payload) }), 90_000);
+    },
+    async setStatus(): Promise<void> {
+      return forbidden("status");
+    },
+    async test(): Promise<ChannelTestResult> {
+      return forbidden("test");
+    },
+    async groups() {
+      const body = await queued(gateway, "list", () => sellerCall<{ data?: unknown }>(gateway, "/api/group/"));
+      return Array.isArray(body.data) ? body.data.map((item) => String(item)).filter(Boolean) : [];
+    },
+    async models() {
+      return [];
+    },
+  };
 }

@@ -8,7 +8,7 @@ import { DEFAULT_SELLER_GATEWAY_NAME } from "./seller-name";
 import type { SessionUser } from "./types";
 import { isBlockedHost, normalizeBaseUrl } from "./url";
 
-export type GatewayKind = "newapi_admin" | "newapi_seller";
+export type GatewayKind = "newapi_admin" | "newapi_seller" | "newapi_supplier";
 
 export type GatewayPublic = {
   id: string;
@@ -66,7 +66,9 @@ type GatewayRow = {
 };
 
 function kindOf(row: GatewayRow): GatewayKind {
-  return row.kind === "newapi_seller" ? "newapi_seller" : "newapi_admin";
+  if (row.kind === "newapi_seller") return "newapi_seller";
+  if (row.kind === "newapi_supplier") return "newapi_supplier";
+  return "newapi_admin";
 }
 
 function present(row: GatewayRow): GatewayPublic {
@@ -109,7 +111,7 @@ function maskedToken(row: GatewayRow): string {
 
 /** Drop the decrypted token before any HTTP response. */
 export function publicGateway(gateway: GatewaySecret): GatewayPublic {
-  const kind = gateway.kind === "newapi_seller" ? "newapi_seller" : "newapi_admin";
+  const kind = kindOf(gateway as unknown as GatewayRow);
   return {
     id: gateway.id,
     name: gateway.name,

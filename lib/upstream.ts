@@ -33,6 +33,10 @@ export type UpstreamChannel = {
   statusReason: string;
   /** Unix ms from other_info status_time, when the gateway sends one. */
   statusTime: number | null;
+  /** 供应商 JWT 站：owned=true 才可管理；owned=false 仅可见。其他网关为 null。 */
+  owned: boolean | null;
+  /** 供应商 JWT 站渠道上的原始 customer_billing 对象（计费源 C 读它）。 */
+  customerBilling: Record<string, unknown> | null;
 };
 
 export class UpstreamFailure extends Error {
@@ -176,6 +180,11 @@ export function parseChannel(raw: unknown): UpstreamChannel | null {
     responseTime: numberOrNull(row.response_time),
     statusReason: info.reason,
     statusTime: info.time,
+    owned: row.owned === true ? true : row.owned === false ? false : null,
+    customerBilling:
+      row.customer_billing && typeof row.customer_billing === "object" && !Array.isArray(row.customer_billing)
+        ? (row.customer_billing as Record<string, unknown>)
+        : null,
   };
 }
 
