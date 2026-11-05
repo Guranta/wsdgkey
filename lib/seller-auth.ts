@@ -1,3 +1,4 @@
+import { Agent } from "undici";
 import { dbAll, dbRun } from "./db";
 import { scrubSecrets } from "./redact";
 import { decryptSecret, encryptSecret } from "./secret-box";
@@ -20,6 +21,28 @@ export type SellerSession = {
 export type AuthClass = "ok" | "mfa" | "captcha" | "credentials" | "unauthorized" | "other";
 
 type Fetcher = typeof fetch;
+
+let laxTlsAgent: Agent | null = null;
+
+/** 单主机 TLS 例外（docs/plans/2026-11-05-supplier-jwt-gateway.md §5）：仅当请求 URL 的
+ *  host 等于例外主机时注入忽略证书校验的 dispatcher；其他主机仍严格校验。
+ *  禁止全局 NODE_TLS_REJECT_UNAUTHORIZED=0。例外主机与 base_url 不一致时不会命中任何请求。 */
+export function tlsExceptionFetcher(host: string | null | undefined): Fetcher {
+  const target = String(host ?? "").trim().toLowerCase();
+  if (!target) return fetch;
+  if (!laxTlsAgent) laxTlsAgent = new Agent({ connect: { rejectUnauthorized: false } });
+  const wrapped: Fetcher = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = typeof input === "string" ? new URL(input) : input instanceof URL ? input : new URL(input.url);
+    if (url.hostname.toLowerCase() !== target) return fetch(input, init);
+    return fetch(input, { ...init, dispatcher: laxTlsAgent } as RequestInit);
+  }) as Fetcher;
+  return wrapped;
+}
+
+async function gatewayFetcher(gatewayId: string): Promise<Fetcher> {
+  const row = await loadRow(gatewayId);
+  return tlsExceptionFetcher(String(row?.tls_exception_host ?? ""));
+}
 
 const locks = new Map<string, Promise<unknown>>();
 const probes = new Map<string, { baseUrl: string; username: string; passwordHash: string; session: SellerSession; expiresAt: number }>();
@@ -145,6 +168,7 @@ type SellerRow = {
   session_sid_cipher: string;
   access_token_cipher: string;
   access_expires_at: number | null;
+  tls_exception_host?: string | null;
 };
 
 async function loadRow(id: string): Promise<SellerRow | null> {
@@ -234,6 +258,10 @@ async function refreshLogin(baseUrl: string, cookie: string, sid: string, fetche
   const headers = new Headers({ accept: "application/json" });
   if (cookie) headers.set("cookie", `new_api_refresh=${cookie}`);
   if (sid) headers.set("x-auth-session", sid);
+  // 供应商 JWT 站的刷新要求站点自身 Origin（缺省会 403 AUTH_ORIGIN_FORBIDDEN）；带上站点自己的 origin 对所有站点都是浏览器同站行为
+  const origin = baseUrl.replace(/\/+$/, "");
+  headers.set("origin", origin);
+  headers.set("referer", `${origin}/`);
   const { response, body } = await siteFetch(baseUrl, "/api/user/auth/refresh", { method: "POST", headers }, fetcher);
   if (response.status === 401) throw Object.assign(new Error("refreshUnauthorized"), { status: 401 });
   const kind = classifyAuthBody(response.status, body);
@@ -246,10 +274,10 @@ async function refreshLogin(baseUrl: string, cookie: string, sid: string, fetche
 
 export async function ensureSellerAccess(gatewayId: string, options: { now?: number; force?: boolean; fetcher?: Fetcher } = {}): Promise<string> {
   const now = options.now ?? Date.now();
-  const fetcher = options.fetcher ?? fetch;
   return withGatewayLock(gatewayId, async () => {
     const row = await loadRow(gatewayId);
     if (!row) throw Object.assign(new Error("gatewayMissing"), { status: 404 });
+    const fetcher = options.fetcher ?? tlsExceptionFetcher(String(row.tls_exception_host ?? ""));
     const cached = unpack(String(row.access_token_cipher ?? ""));
     const expiresAt = Number(row.access_expires_at ?? 0);
     if (!options.force && cached && !tokenNeedsRefresh(expiresAt, now)) return cached;
@@ -288,6 +316,7 @@ export async function ensureSellerAccess(gatewayId: string, options: { now?: num
 }
 
 export async function sellerRequest(gatewayId: string, baseUrl: string, path: string, init: RequestInit = {}, fetcher: Fetcher = fetch): Promise<unknown> {
+  if (fetcher === fetch) fetcher = await gatewayFetcher(gatewayId);
   const send = async (token: string) => {
     const headers = new Headers(init.headers);
     headers.set("authorization", `Bearer ${token}`);

@@ -469,6 +469,17 @@ export async function ensureReady(): Promise<void> {
         ["log_quota", "REAL"],
       ]);
       await addMissingColumns(db, "users", [["locale", "TEXT"]]);
+      // 供应商 JWT 网关（docs/plans/2026-11-05-supplier-jwt-gateway.md §3/§9）
+      await addMissingColumns(db, "gateways", [
+        ["allowed_origin", "TEXT"],
+        ["supplier_label", "TEXT"],
+        ["profile_cache", "TEXT"],
+        ["tls_exception_host", "TEXT"],
+      ]);
+      await addMissingColumns(db, "channels", [
+        ["owned", "INTEGER"],
+        ["supplier_kind", "TEXT"],
+      ]);
       await addMissingColumns(db, "billing_rows", [["binding_id", "TEXT"]]);
       // 可插拔计费源（docs/plans/2026-11-05-billing-pluggable.md §9）：旧行这些列为空，走旧渲染。
       await addMissingColumns(db, "billing_rows", [
