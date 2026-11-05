@@ -510,7 +510,9 @@
     "pickDay": "Bill date",
     "noBillDay": "No bill for {day} yet",
     "allSuppliers": "All suppliers",
-    "supplierFilter": "Supplier"
+    "supplierFilter": "Supplier",
+    "staleTag": "Stale",
+    "unavailableTag": "Source unavailable"
   },
   "recon": {
     "loading": "Loading reconciliation…",

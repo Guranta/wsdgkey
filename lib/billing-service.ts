@@ -315,7 +315,11 @@ async function writeRow(channelId: string, billDay: string, backfillAt: number |
 }
 
 export async function publishBill(billDay: string, baselineDay: string): Promise<void> {
-  const channels = (await dbAll("SELECT id FROM channels WHERE created_here = 1")) as { id: string }[];
+  // 供应商 JWT 网关的渠道走源 C 快照差，由 billingView 现算；不进旧基线路径（used_quota=0 会造成假零）
+  const channels = (await dbAll(
+    `SELECT c.id FROM channels c JOIN gateways g ON g.id = c.gateway_id
+     WHERE c.created_here = 1 AND COALESCE(g.kind, 'newapi_admin') <> 'newapi_supplier'`,
+  )) as { id: string }[];
   for (const channel of channels) await writeRow(channel.id, billDay, null);
   const counts = await countRun(baselineDay);
   await dbRun(
@@ -383,6 +387,7 @@ export async function missingBaselineChannels(baselineDay: string): Promise<Plan
      LEFT JOIN channel_baselines b ON b.channel_id = c.id AND b.day = ?
      LEFT JOIN billing_attempts a ON a.channel_id = c.id AND a.baseline_day = ? AND a.status = 'failed'
      WHERE c.created_here = 1 AND b.channel_id IS NULL
+       AND NOT EXISTS (SELECT 1 FROM gateways g WHERE g.id = c.gateway_id AND g.kind = 'newapi_supplier')
        AND NOT (COALESCE(c.origin, 'created') = 'imported' AND c.imported_at IS NOT NULL AND c.imported_at >= ?)
      ORDER BY c.used_quota DESC, c.created_at DESC`,
     [baselineDay, baselineDay, shanghaiMidnight(baselineDay)],
@@ -404,6 +409,90 @@ export type BillingViewOptions = {
   /** 管理员按供应商筛选（用户 id）；供应商恒定只能看自己。 */
   supplierId?: string | null;
 };
+
+
+/** 源 C 行：billDay 与次日两张 0 点快照的 USD 差（billing-pluggable §4/§9）。金额乘 QUOTA_PER_DOLLAR 入 consumption，沿用下游额度→美元格式化。 */
+async function supplierBillRows(channels: Row[], billDay: string): Promise<Row[]> {
+  if (!channels.length) return [];
+  const { addDays } = await import("./shanghai");
+  const nextDay = addDays(billDay, 1);
+  const ids = channels.map((channel) => String(channel.id));
+  const placeholders = ids.map(() => "?").join(",");
+  const snaps = (await dbAll(
+    `SELECT channel_id, day, quality, amount, fx_rate, upstream_source FROM billing_snapshots
+     WHERE source_id = 'customer_billing' AND day IN (?, ?) AND channel_id IN (${placeholders})`,
+    [billDay, nextDay, ...ids],
+  )) as Row[];
+  const byChannel = new Map<string, { today?: Row; next?: Row; firstDay?: string }>();
+  const firstDays = (await dbAll(
+    `SELECT channel_id, MIN(day) AS first_day FROM billing_snapshots WHERE source_id = 'customer_billing' AND channel_id IN (${placeholders}) GROUP BY channel_id`,
+    ids,
+  )) as Row[];
+  const firstBy = new Map(firstDays.map((row) => [String(row.channel_id), String(row.first_day)]));
+  for (const snap of snaps) {
+    const entry = byChannel.get(String(snap.channel_id)) ?? {};
+    if (String(snap.day) === billDay) entry.today = snap;
+    if (String(snap.day) === nextDay) entry.next = snap;
+    byChannel.set(String(snap.channel_id), entry);
+  }
+  const out: Row[] = [];
+  for (const channel of channels) {
+    const id = String(channel.id);
+    const entry = byChannel.get(id) ?? {};
+    const first = firstBy.get(id);
+    const base = {
+      channel_id: id,
+      name: channel.name,
+      group_name: channel.group_name,
+      creator_name: channel.creator_name,
+      type: channel.type,
+      origin: "imported",
+      billing_mode: "snapshot",
+      test_quota: 0,
+      start_day: billDay,
+      end_day: nextDay,
+      span_days: 1,
+      label: "",
+      backfill_at: null,
+      today_quota: null,
+      used_quota: null,
+    };
+    if (first && first > billDay) {
+      out.push({ ...base, kind: "no-baseline", consumption: null, quality: "missing", finding: "" });
+      continue;
+    }
+    const toReading = (row: Row | undefined) =>
+      row
+        ? {
+            quality: String(row.quality) as import("./billing-math").BillingQuality,
+            amount: row.amount === null || row.amount === undefined ? null : Number(row.amount),
+            unit: "usd" as const,
+            fxRate: row.fx_rate === null || row.fx_rate === undefined ? null : Number(row.fx_rate),
+            upstreamSource: String(row.upstream_source ?? ""),
+            pulledAt: 0,
+          }
+        : null;
+    const { dailyDiff } = await import("./billing-math");
+    const diff = dailyDiff(toReading(entry.today), toReading(entry.next));
+    if (diff.quality !== "ok" || diff.amount === null) {
+      out.push({ ...base, kind: "unsynced", consumption: null, quality: diff.quality, finding: "" });
+      continue;
+    }
+    const todayAmount = Number((entry.next as Row).amount) * QUOTA_PER_DOLLAR;
+    const cumulative = Number((entry.next as Row).amount) * QUOTA_PER_DOLLAR;
+    out.push({
+      ...base,
+      kind: "amount",
+      consumption: diff.amount * QUOTA_PER_DOLLAR,
+      today_quota: todayAmount === todayAmount ? diff.amount * QUOTA_PER_DOLLAR : null,
+      used_quota: cumulative,
+      quality: "ok",
+      fx_rate: diff.fxRate,
+      finding: diff.anomaly ? "anomaly" : "",
+    });
+  }
+  return out;
+}
 
 export async function billingView(actor: SessionUser, options: BillingViewOptions = {}) {
   const unsyncedOnly = options.unsyncedOnly === true;
@@ -428,10 +517,25 @@ export async function billingView(actor: SessionUser, options: BillingViewOption
         [billDay, ...scopeParams],
       )) as Row[])
     : [];
-  const visible = unsyncedOnly ? rows.filter((row) => row.kind !== "amount") : rows;
-  const markers = billDay ? await rebindMarkers(rows.map((row) => String(row.channel_id)), billDay) : new Map();
-  const counted = rows.filter((row) => row.kind === "amount" && row.consumption !== null && row.consumption !== undefined);
-  const unsynced = rows.filter((row) => row.kind !== "amount");
+  const supplierIds = new Set<string>();
+  if (billDay) {
+    const ids = (await dbAll(
+      `SELECT c.id FROM channels c JOIN gateways g ON g.id = c.gateway_id WHERE g.kind = 'newapi_supplier' AND c.created_here = 1`,
+    )) as { id: string }[];
+    for (const idRow of ids) supplierIds.add(String(idRow.id));
+  }
+  const supplierChannels = billDay
+    ? ((await dbAll(
+        `SELECT c.id, c.name, c.group_name, c.type, u.name AS creator_name, c.imported_at FROM channels c JOIN gateways g ON g.id = c.gateway_id LEFT JOIN users u ON u.id = c.creator_user_id WHERE g.kind = 'newapi_supplier' AND c.created_here = 1 ${scope}`,
+        scopeParams,
+      )) as Row[])
+    : [];
+  const supplierRows = billDay ? await supplierBillRows(supplierChannels, billDay) : [];
+  const merged = [...rows.filter((row) => !supplierIds.has(String(row.channel_id))), ...supplierRows];
+  const visible = unsyncedOnly ? merged.filter((row) => row.kind !== "amount") : merged;
+  const markers = billDay ? await rebindMarkers(merged.map((row) => String(row.channel_id)), billDay) : new Map();
+  const counted = merged.filter((row) => row.kind === "amount" && row.consumption !== null && row.consumption !== undefined);
+  const unsynced = merged.filter((row) => row.kind !== "amount");
   const by = (key: string) => {
     const map = new Map<string, number>();
     for (const row of counted) {
@@ -483,10 +587,10 @@ export async function billingView(actor: SessionUser, options: BillingViewOption
     billDay,
     unsyncedCount: unsynced.length,
     totalConsumption: counted.reduce((sum, row) => sum + Number(row.consumption ?? 0), 0),
-    totalTestQuota: rows.reduce((sum, row) => sum + Number(row.test_quota ?? 0), 0),
+    totalTestQuota: merged.reduce((sum, row) => sum + Number(row.test_quota ?? 0), 0),
     showTestLine: rows.some((row) => String(row.billing_mode ?? "") !== "snapshot"),
-    remainingBalance: rows.reduce((sum, row) => sum + (row.balance === null || row.balance === undefined ? 0 : Number(row.balance)), 0),
-    usedUsd: rows.reduce((sum, row) => sum + Number(row.used_quota ?? 0), 0) / QUOTA_PER_DOLLAR,
+    remainingBalance: merged.reduce((sum, row) => sum + (row.balance === null || row.balance === undefined ? 0 : Number(row.balance)), 0),
+    usedUsd: merged.reduce((sum, row) => sum + Number(row.used_quota ?? 0), 0) / QUOTA_PER_DOLLAR,
     byType: (() => {
       const map = new Map<string, number>();
       for (const row of counted) {
@@ -520,6 +624,7 @@ export async function billingView(actor: SessionUser, options: BillingViewOption
             ? null
             : Number(row.today_quota),
       billingMode: String(row.billing_mode ?? ""),
+      quality: String(row.quality ?? ""),
       imported: String(row.origin ?? "") === "imported",
       before:
         row.used_quota === null || row.used_quota === undefined || row.today_quota === null || row.today_quota === undefined

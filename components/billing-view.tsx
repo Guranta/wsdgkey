@@ -30,6 +30,7 @@ type BillRow = {
   backfillAt: number | null;
   gray: boolean;
   billingMode?: string;
+  quality?: string;
   imported?: boolean;
   rebindFrom?: number | null;
   rebindTo?: number | null;

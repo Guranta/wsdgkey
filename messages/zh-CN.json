@@ -510,7 +510,9 @@
     "pickDay": "账单日期",
     "noBillDay": "{day} 还没有账单",
     "allSuppliers": "全部供应商",
-    "supplierFilter": "供应商"
+    "supplierFilter": "供应商",
+    "staleTag": "过期",
+    "unavailableTag": "源不可用"
   },
   "recon": {
     "loading": "正在读取对账…",
