@@ -324,7 +324,10 @@
       "limitPlain": "单渠道 {per}/分",
       "supplierLimit": "限流由管理员配置"
     },
-    "readonlyTag": "不可管"
+    "readonlyTag": "不可管",
+    "importSplit": "可管 {managed} · 仅可见 {visible}",
+    "noManageable": "暂无可管理渠道",
+    "importBillingNote": "导入不修改渠道设置与状态；计费从导入后第一个 0:00 快照起算。"
   },
   "drawer": {
     "editTitle": "修改 {name}",

@@ -26,7 +26,7 @@ type GatewayOption = {
   accessExpiresAt?: number | null;
 };
 type SellerCap = { canWrite: boolean; canToggle: boolean; maxChannels: number; total: number };
-type ImportResult = { imported: number; skipped: number; failed: number; failures: { id: number; name: string; reason: string }[]; keptAutoDisabled: number };
+type ImportResult = { imported: number; skipped: number; failed: number; failures: { id: number; name: string; reason: string }[]; keptAutoDisabled: number; manageable?: number; visibleOnly?: number };
 type Creator = { id: string; name: string; username: string };
 type ChannelItem = DrawerChannel & {
   upstreamId: number;
@@ -673,6 +673,13 @@ export function ChannelsView() {
               </ul>
             ) : null}
             {importResult.keptAutoDisabled > 0 ? <p className="mt-3 text-xs leading-5 text-muted">{t("importKept")}</p> : null}
+            {importResult.manageable !== undefined ? (
+              <p className="mt-2 text-xs leading-5 text-muted">
+                {t("importSplit", { managed: importResult.manageable ?? 0, visible: importResult.visibleOnly ?? 0 })}
+                {importResult.manageable === 0 ? ` · ${t("noManageable")}` : ""}
+              </p>
+            ) : null}
+            <p className="mt-1 text-xs leading-5 text-muted">{t("importBillingNote")}</p>
             <div className="mt-5 flex flex-wrap justify-end gap-2">
               <button type="button" className={buttonClass("secondary")} disabled={importing} onClick={() => void runImport()}>{t("importAgain")}</button>
               <button type="button" className={buttonClass("primary")} onClick={() => setImportResult(null)}>{t("importFinish")}</button>

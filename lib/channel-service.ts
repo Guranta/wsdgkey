@@ -891,7 +891,7 @@ async function finishGatewayList(gatewayId: string): Promise<void> {
 
 export async function importSellerChannels(actor: SessionUser, gatewayId: string) {
   const gateway = await getGateway(gatewayId);
-  if (!gateway || gateway.kind !== "newapi_seller") throw httpError("gatewayMissing", 404);
+  if (!gateway || (gateway.kind !== "newapi_seller" && gateway.kind !== "newapi_supplier")) throw httpError("gatewayMissing", 404);
   if (actor.role !== "admin" && gateway.ownerUserId !== actor.id) throw httpError("gatewayMissing", 404);
   const owner = gateway.ownerUserId || actor.id;
   const api = gatewayApi(gateway);
@@ -901,7 +901,10 @@ export async function importSellerChannels(actor: SessionUser, gatewayId: string
   let keptAutoDisabled = 0;
   const failures: { id: number; name: string; reason: string }[] = [];
   let total = 0;
-  for (let page = 1; page <= 50; page += 1) {
+  let manageable = 0;
+  let visibleOnly = 0;
+  // 按 total 翻页，不设 50 页业务上限（供应商站 625+ 还会涨）；2000 页仅作熔断
+  for (let page = 1; page <= 2000; page += 1) {
     const listed = await api.list(page);
     total = listed.total;
     for (const item of listed.items) {
@@ -910,6 +913,8 @@ export async function importSellerChannels(actor: SessionUser, gatewayId: string
         skipped += 1;
         continue;
       }
+      if (item.owned === true) manageable += 1;
+      else if (item.owned === false) visibleOnly += 1;
       try {
         const id = await rememberChannel(gateway.id, item, owner);
         if (!id) throw new Error("importFailed");
@@ -927,7 +932,7 @@ export async function importSellerChannels(actor: SessionUser, gatewayId: string
     }
     if (page * 20 >= total) break;
   }
-  return { imported, skipped, failed, failures, keptAutoDisabled };
+  return { imported, skipped, failed, failures, keptAutoDisabled, manageable, visibleOnly };
 }
 
 export async function readSellerCap(actor: SessionUser, gatewayId: string) {

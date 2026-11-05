@@ -324,7 +324,10 @@
       "limitPlain": "{per}/min per channel",
       "supplierLimit": "Rate limits are set by an admin"
     },
-    "readonlyTag": "Read-only"
+    "readonlyTag": "Read-only",
+    "importSplit": "Manageable {managed} · visible-only {visible}",
+    "noManageable": "No manageable channels yet",
+    "importBillingNote": "Import never touches upstream settings or status; billing starts from the first 00:00 snapshot after import."
   },
   "drawer": {
     "editTitle": "Edit {name}",
