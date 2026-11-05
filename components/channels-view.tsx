@@ -513,6 +513,7 @@ export function ChannelsView() {
                           <span className="inline-flex items-center gap-2">
                             {item.name}
                             {item.origin === "imported" ? <span className="whitespace-nowrap rounded-full bg-input px-2 py-0.5 text-xs font-normal text-muted">{t("importedTag")}</span> : null}
+                            {supplierGateway && item.owned !== 1 ? <span className="whitespace-nowrap rounded-full bg-input px-2 py-0.5 text-xs font-normal text-muted">{t("readonlyTag")}</span> : null}
                           </span>
                         </td>
                         <td className="whitespace-nowrap px-4 py-3.5">
@@ -548,9 +549,9 @@ export function ChannelsView() {
                         <td className="whitespace-nowrap px-4 py-3.5 text-[13px] text-muted">{formatTimestamp(item.createdAt, locale)}</td>
                         <td className="sticky right-0 whitespace-nowrap bg-card px-3 py-3.5 group-hover:bg-hover">
                           <div className="flex justify-end gap-0.5 opacity-70 transition group-hover:opacity-100 group-focus-within:opacity-100">
-                            <button type="button" className={buttonClass("ghost", "h-7 px-2 text-xs")} onClick={() => void testOne(item.id)}>{t("test")}</button>
-                            <button type="button" className={buttonClass("ghost", "h-7 px-2 text-xs")} onClick={() => setDrawer(item)}>{t("edit")}</button>
-                            {canToggle ? <button type="button" className={buttonClass("ghost", "h-7 px-2 text-xs")} onClick={() => setConfirm({ ids: [item.id], enabled: item.status !== "enabled", names: [`#${item.upstreamId} ${item.name}`] })}>{item.status === "enabled" ? t("disable") : t("enable")}</button> : null}
+                            {supplierGateway ? null : <button type="button" className={buttonClass("ghost", "h-7 px-2 text-xs")} onClick={() => void testOne(item.id)}>{t("test")}</button>}
+                            {supplierGateway && item.owned !== 1 ? null : <button type="button" className={buttonClass("ghost", "h-7 px-2 text-xs")} onClick={() => setDrawer(item)}>{t("edit")}</button>}
+                            {supplierGateway || !canToggle ? null : <button type="button" className={buttonClass("ghost", "h-7 px-2 text-xs")} onClick={() => setConfirm({ ids: [item.id], enabled: item.status !== "enabled", names: [`#${item.upstreamId} ${item.name}`] })}>{item.status === "enabled" ? t("disable") : t("enable")}</button>}
                             {user?.role === "admin" && item.upstreamMissing ? <button type="button" className={buttonClass("ghost", "h-7 px-2 text-xs")} onClick={() => { setRebind(item); setRebindId(""); }}>{t("rebind")}</button> : null}
                           </div>
                           <div className="mt-0.5 max-w-64 truncate text-right text-xs text-muted" title={testText(item)}>{testText(item)}</div>

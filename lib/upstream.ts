@@ -146,6 +146,12 @@ function numberOrNull(value: unknown): number | null {
 export function parseChannel(raw: unknown): UpstreamChannel | null {
   if (!raw || typeof raw !== "object") return null;
   const row = raw as Record<string, unknown>;
+  // 部分站点用超大哨兵值（如 weight=1e16）；超过安全整数的按上限收敛，避免 node:sqlite 读回抛 RangeError
+  const safeInt = (value: unknown, fallback = 0): number => {
+    const num = Number(value);
+    if (!Number.isFinite(num)) return fallback;
+    return Math.min(Math.max(Math.trunc(num), -9007199254740991), 9007199254740991);
+  };
   const id = Number(row.id);
   // 供应商 JWT 站的 id 已见超过 1e15；不安全整数往返会失真，该行不入库（计划 §6）
   if (!Number.isFinite(id) || !Number.isSafeInteger(id)) return null;
@@ -168,8 +174,8 @@ export function parseChannel(raw: unknown): UpstreamChannel | null {
     autoBan: Number(row.auto_ban ?? 1) !== 0,
     createdTime: Number(row.created_time ?? 0),
     todayFromPayload: today,
-    priority: Number(row.priority ?? 0),
-    weight: Number(row.weight ?? 0),
+    priority: safeInt(row.priority ?? 0),
+    weight: safeInt(row.weight ?? 0),
     tag: String(row.tag ?? ""),
     other: String(row.other ?? ""),
     statusCodeMapping: String(row.status_code_mapping ?? ""),
