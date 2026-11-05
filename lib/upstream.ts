@@ -147,7 +147,8 @@ export function parseChannel(raw: unknown): UpstreamChannel | null {
   if (!raw || typeof raw !== "object") return null;
   const row = raw as Record<string, unknown>;
   const id = Number(row.id);
-  if (!Number.isFinite(id)) return null;
+  // 供应商 JWT 站的 id 已见超过 1e15；不安全整数往返会失真，该行不入库（计划 §6）
+  if (!Number.isFinite(id) || !Number.isSafeInteger(id)) return null;
   const today =
     numberOrNull(row.today_quota) ?? numberOrNull(row.used_quota_today) ?? numberOrNull(row.today_used_quota);
   const info = otherInfoOf(row.other_info);
