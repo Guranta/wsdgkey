@@ -1,6 +1,6 @@
 import { apiError, fromError } from "@/lib/api-error";
 import { currentUser } from "@/lib/current-user";
-import { createGateway, createSellerGateway, listGateways, listOwnSellerGateways } from "@/lib/gateways";
+import { createGateway, createSellerGateway, createSupplierGateway, listGateways, listOwnSellerGateways } from "@/lib/gateways";
 import { readJson } from "@/lib/http";
 
 export async function GET() {
@@ -22,6 +22,16 @@ export async function POST(req: Request) {
         username: String(body.username ?? ""),
         password: String(body.password ?? ""),
         probeId: typeof body.probeId === "string" ? body.probeId : "",
+      });
+      return Response.json(created, { status: 201, headers: { "cache-control": "no-store" } });
+    }
+    if (body?.kind === "newapi_supplier") {
+      const created = await createSupplierGateway(user, {
+        name: String(body.name ?? ""),
+        baseUrl: String(body.baseUrl ?? ""),
+        username: String(body.username ?? ""),
+        password: String(body.password ?? ""),
+        tlsExceptionHost: typeof body.tlsExceptionHost === "string" ? body.tlsExceptionHost : "",
       });
       return Response.json(created, { status: 201, headers: { "cache-control": "no-store" } });
     }

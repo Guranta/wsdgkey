@@ -681,7 +681,11 @@
     "connectionError": "连接异常",
     "updateCredentials": "更新账号",
     "sellerSaved": "供应商账号已保存。密码只留在服务器上。",
-    "renewalBanner": "供应商账号令牌自动续期失败 · {name} 最近一次续期 {when} 失败（站点返回：{detail}），当前令牌将于 {expires} 过期。请到 设置 › 网关 重新填写账号密码并测试连接。"
+    "renewalBanner": "供应商账号令牌自动续期失败 · {name} 最近一次续期 {when} 失败（站点返回：{detail}），当前令牌将于 {expires} 过期。请到 设置 › 网关 重新填写账号密码并测试连接。",
+    "kindSupplier": "供应商 JWT",
+    "supplierOriginNote": "刷新由代理带上该站点自身的 Origin 和 Referer；错误 Origin 会返回 AUTH_ORIGIN_FORBIDDEN。",
+    "supplierTlsNote": "该站若以 IP + 自签证书提供 HTTPS，需由部署者为该主机配置证书例外（tls_exception_host），否则连接会失败。",
+    "supplierSaveTests": "保存时会用该账号实际登录一次以验证凭据。"
   },
   "users": {
     "loading": "正在读取账号…",

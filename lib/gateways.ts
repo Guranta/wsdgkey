@@ -257,6 +257,36 @@ async function persistSeller(id: string, session: SellerSession, now: number): P
   );
 }
 
+export async function createSupplierGateway(
+  actor: SessionUser,
+  input: { name: string; baseUrl: string; username: string; password: string; probeId?: string; tlsExceptionHost?: string },
+): Promise<GatewayPublic> {
+  const baseUrl = assertUrl(input.baseUrl);
+  const host = new URL(baseUrl).hostname;
+  const name = input.name.trim() || `jwt-${host.replace(/[^a-z0-9]+/gi, "-")}`;
+  if (name.length > 40) throw Object.assign(new Error("gatewayName"), { status: 400 });
+  const username = input.username.trim();
+  const password = input.password;
+  if (!username || username.length > 80) throw Object.assign(new Error("sellerCredentials"), { status: 400 });
+  if (password.length < 1) throw Object.assign(new Error("sellerPassword"), { status: 400 });
+  // 单主机 TLS 例外只接受等于 base_url host 的值（计划 §5）；其余输入一律忽略
+  const tlsHost = String(input.tlsExceptionHost ?? "").trim().toLowerCase() === host.toLowerCase() ? host : "";
+  const { passwordLogin } = await import("./seller-auth");
+  const session = await passwordLogin(baseUrl, username, password);
+  const now = Date.now();
+  const id = crypto.randomUUID();
+  await dbRun(
+    `INSERT INTO gateways (
+      id, name, base_url, token_cipher, admin_user_id, demo, created_at, updated_at, kind, username, password_cipher, owner_user_id, auth_status, tls_exception_host
+    ) VALUES (?, ?, ?, '', '', 0, ?, ?, 'newapi_supplier', ?, ?, ?, 'ok', ?)`,
+    [id, name, baseUrl, now, now, username, encryptSecret(password), actor.id, tlsHost || null],
+  );
+  await persistSeller(id, session, now);
+  const created = await getGateway(id);
+  if (!created) throw Object.assign(new Error("gatewaySaveFailed"), { status: 500 });
+  return publicGateway(created);
+}
+
 export async function createSellerGateway(
   actor: SessionUser,
   input: { name: string; baseUrl: string; username: string; password: string; probeId?: string },

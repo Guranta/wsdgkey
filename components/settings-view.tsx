@@ -19,7 +19,7 @@ type Gateway = {
   disabled?: boolean;
   channelCount?: number;
   lastSyncAt?: number | null;
-  kind?: "newapi_admin" | "newapi_seller";
+  kind?: "newapi_admin" | "newapi_seller" | "newapi_supplier";
   username?: string;
   authStatus?: string;
   authError?: string;
@@ -27,7 +27,7 @@ type Gateway = {
   accessExpiresAt?: number | null;
 };
 type Limits = { siteName: string; gatewayPerMin: number; channelPerMin: number; concurrency: number; testCooldownMin: number; quotaPerUnit: number; reconTolerancePct: number; zeroDays: number; manualTolerancePct: number };
-type Draft = { id: string; kind: "newapi_admin" | "newapi_seller"; name: string; baseUrl: string; adminUserId: string; token: string; username: string; password: string; nameTouched: boolean };
+type Draft = { id: string; kind: "newapi_admin" | "newapi_seller" | "newapi_supplier"; name: string; baseUrl: string; adminUserId: string; token: string; username: string; password: string; nameTouched: boolean };
 
 const EMPTY: Limits = { siteName: BRAND_NAME, gatewayPerMin: 60, channelPerMin: 5, concurrency: 3, testCooldownMin: 10, quotaPerUnit: 500000, reconTolerancePct: 1, zeroDays: 3, manualTolerancePct: 2 };
 const BLANK: Draft = { id: "", kind: "newapi_admin", name: "", baseUrl: "", adminUserId: "1", token: "", username: "", password: "", nameTouched: false };
@@ -74,6 +74,8 @@ export function SettingsView() {
 
   const dirty = admin && JSON.stringify(limits) !== JSON.stringify(saved);
   const seller = form.kind === "newapi_seller";
+  const supplier = form.kind === "newapi_supplier";
+  const accountKind = seller || supplier;
   const alerts = user?.renewalAlerts ?? [];
 
   function openAdd(kind: Draft["kind"] = admin ? "newapi_admin" : "newapi_seller") {
@@ -116,7 +118,9 @@ export function SettingsView() {
     setError("");
     const payload = seller
       ? { kind: "newapi_seller", name: form.name, baseUrl: form.baseUrl, username: form.username, password: form.password, probeId: probe?.id ?? "" }
-      : { name: form.name, baseUrl: form.baseUrl, adminUserId: form.adminUserId, token: form.token };
+      : supplier
+        ? { kind: "newapi_supplier", name: form.name, baseUrl: form.baseUrl, username: form.username, password: form.password }
+        : { name: form.name, baseUrl: form.baseUrl, adminUserId: form.adminUserId, token: form.token };
     const res = await fetch(form.id ? `/api/gateways/${form.id}` : "/api/gateways", {
       method: form.id ? "PATCH" : "POST",
       headers: { "content-type": "application/json" },
@@ -301,19 +305,20 @@ export function SettingsView() {
               <div className="mt-4 inline-flex w-fit max-w-full flex-wrap rounded-full bg-input p-1" role="group">
                 <button type="button" className={form.kind === "newapi_admin" ? "whitespace-nowrap rounded-full bg-card px-3 py-1 text-xs font-semibold" : "whitespace-nowrap rounded-full px-3 py-1 text-xs text-secondary"} onClick={() => patch({ kind: "newapi_admin", name: "" })}>{t("kindAdmin")}</button>
                 <button type="button" className={seller ? "whitespace-nowrap rounded-full bg-card px-3 py-1 text-xs font-semibold" : "whitespace-nowrap rounded-full px-3 py-1 text-xs text-secondary"} onClick={() => patch({ kind: "newapi_seller", name: suggestSellerGatewayName(form.baseUrl) })}>{t("kindSeller")}</button>
+                <button type="button" className={supplier ? "whitespace-nowrap rounded-full bg-card px-3 py-1 text-xs font-semibold" : "whitespace-nowrap rounded-full px-3 py-1 text-xs text-secondary"} onClick={() => patch({ kind: "newapi_supplier", name: form.baseUrl ? `jwt-${new URL(form.baseUrl.includes("://") ? form.baseUrl : `https://${form.baseUrl}`).hostname.replace(/[^a-z0-9]+/gi, "-")}` : "" })}>{t("kindSupplier")}</button>
               </div>
             ) : null}
             <div className="mt-4 space-y-3 overflow-y-auto">
               <label className="block text-sm">
                 <span className="mb-1.5 block text-secondary">{t("name")}</span>
                 <input className={fieldClass} value={form.name} onChange={(event) => patch({ name: event.target.value }, true)} />
-                {seller ? <span className="mt-1 block text-xs leading-5 text-muted">{t("nameHint")}</span> : null}
+                {accountKind ? <span className="mt-1 block text-xs leading-5 text-muted">{t("nameHint")}</span> : null}
               </label>
               <label className="block text-sm">
                 <span className="mb-1.5 block text-secondary">{t("baseUrl")}</span>
                 <input className={fieldClass} value={form.baseUrl} onChange={(event) => patch({ baseUrl: event.target.value })} />
               </label>
-              {seller ? (
+              {accountKind ? (
                 <>
                   <label className="block text-sm">
                     <span className="mb-1.5 block text-secondary">{t("sellerUsername")}</span>
@@ -326,8 +331,18 @@ export function SettingsView() {
                       <button type="button" className={buttonClass("secondary", "shrink-0")} onClick={() => setShowPassword((value) => !value)}>{showPassword ? t("hidePassword") : t("showPassword")}</button>
                     </span>
                   </label>
-                  <button type="button" className={buttonClass("secondary")} disabled={busy || !form.baseUrl || !form.username || !form.password} onClick={() => void testSeller()}>{busy ? t("testing") : t("testConnection")}</button>
-                  {probe ? <p className="text-sm text-ok">{t("loggedIn", { ms: probe.latencyMs })}</p> : <p className="text-xs leading-5 text-muted">{t("saveRequiresTest")}</p>}
+                  {seller ? (
+                    <>
+                      <button type="button" className={buttonClass("secondary")} disabled={busy || !form.baseUrl || !form.username || !form.password} onClick={() => void testSeller()}>{busy ? t("testing") : t("testConnection")}</button>
+                      {probe ? <p className="text-sm text-ok">{t("loggedIn", { ms: probe.latencyMs })}</p> : <p className="text-xs leading-5 text-muted">{t("saveRequiresTest")}</p>}
+                    </>
+                  ) : (
+                    <>
+                      <p className="text-xs leading-5 text-muted">{t("supplierOriginNote")}</p>
+                      <p className="rounded-control bg-warn-soft px-3 py-2 text-xs leading-5 text-warn">{t("supplierTlsNote")}</p>
+                      <p className="text-xs leading-5 text-muted">{t("supplierSaveTests")}</p>
+                    </>
+                  )}
                   {probe ? (
                     <div className="rounded-control bg-ok-soft px-3 py-3 text-sm text-ok">
                       <span className="whitespace-nowrap rounded-full bg-card px-2 py-0.5 text-xs font-semibold">{t("renewOn")}</span>

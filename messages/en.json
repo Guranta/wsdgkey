@@ -681,7 +681,11 @@
     "connectionError": "Connection error",
     "updateCredentials": "Update account",
     "sellerSaved": "Supplier account saved. The password stays on the server.",
-    "renewalBanner": "Supplier account token renewal failed · {name} last renewal at {when} failed (site returned: {detail}). The current token expires at {expires}. Open Settings › Gateways, enter the account password again, and test the connection."
+    "renewalBanner": "Supplier account token renewal failed · {name} last renewal at {when} failed (site returned: {detail}). The current token expires at {expires}. Open Settings › Gateways, enter the account password again, and test the connection.",
+    "kindSupplier": "Supplier JWT",
+    "supplierOriginNote": "Refreshes carry the site's own Origin and Referer; a wrong Origin returns AUTH_ORIGIN_FORBIDDEN.",
+    "supplierTlsNote": "If the site serves HTTPS with an IP + self-signed certificate, the deployer must set a per-host TLS exception (tls_exception_host) or the connection will fail.",
+    "supplierSaveTests": "Saving performs a real login once to verify the credentials."
   },
   "users": {
     "loading": "Loading accounts…",
