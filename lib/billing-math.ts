@@ -251,3 +251,65 @@ export function takeSlot(hits: number[], now: number, limit: number, windowMs = 
   hits.push(now);
   return true;
 }
+
+// —— 可插拔计费源（docs/plans/2026-11-05-billing-pluggable.md §4/§8）——
+
+export type BillingQuality = "ok" | "missing" | "stale" | "unavailable";
+
+/** 某渠道某上海日 0 点的权威读数。源的实现只负责把上游读成这个。 */
+export type MidnightReading = {
+  quality: BillingQuality;
+  /** 仅 quality==="ok" 时有权威金额。 */
+  amount: number | null;
+  unit: "quota" | "usd";
+  /** 源 C：customer_billing.exchange_rate；其余源为 null。 */
+  fxRate: number | null;
+  /** 上游来源名，如 dianju_call_logs。 */
+  upstreamSource: string;
+  pulledAt: number;
+};
+
+/** customer_billing 的形状（供应商 JWT 站渠道对象上观察到的字段）。 */
+export type CustomerBillingLike = {
+  state?: string;
+  stale?: boolean;
+  amount_usd?: unknown;
+  exchange_rate?: unknown;
+  source?: string;
+};
+
+function parseAmount(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && value.trim() !== "" && Number.isFinite(Number(value))) return Number(value);
+  return null;
+}
+
+/** state=ready 但金额是空串/非数字按 missing，禁止当 0（BILL-C-01、BILL-C-02）。 */
+export function readCustomerBilling(cb: CustomerBillingLike | null | undefined, pulledAt: number): MidnightReading {
+  const upstreamSource = typeof cb?.source === "string" ? cb.source : "";
+  if (cb?.state === "unavailable") return { quality: "unavailable", amount: null, unit: "usd", fxRate: null, upstreamSource, pulledAt };
+  if (cb?.stale === true) return { quality: "stale", amount: null, unit: "usd", fxRate: null, upstreamSource, pulledAt };
+  const amount = parseAmount(cb?.amount_usd);
+  if (cb?.state === "ready" && amount !== null) {
+    const rate = parseAmount(cb?.exchange_rate);
+    return { quality: "ok", amount, unit: "usd", fxRate: rate, upstreamSource, pulledAt };
+  }
+  return { quality: "missing", amount: null, unit: "usd", fxRate: null, upstreamSource, pulledAt };
+}
+
+/** 两侧快照落质量后的日差。quality 优先级 unavailable > stale > missing；负差保留负数并带 anomaly，不取绝对值（BILL-C-07）。 */
+export function dailyDiff(
+  prev: MidnightReading | null,
+  next: MidnightReading | null,
+): { quality: BillingQuality; amount: number | null; anomaly: "negative" | null; fxRate: number | null; upstreamSource: string } {
+  const worse: BillingQuality[] = ["unavailable", "stale", "missing"];
+  const side = (reading: MidnightReading | null): BillingQuality => (reading ? reading.quality : "missing");
+  const candidates: BillingQuality[] = [side(prev), side(next)].filter((quality) => quality !== "ok");
+  const quality = candidates.length ? worse.find((rank) => candidates.includes(rank)) ?? "missing" : "ok";
+  const upstreamSource = next?.upstreamSource || prev?.upstreamSource || "";
+  if (quality !== "ok" || prev?.amount === null || prev?.amount === undefined || next?.amount === null || next?.amount === undefined) {
+    return { quality, amount: null, anomaly: null, fxRate: null, upstreamSource };
+  }
+  const amount = next.amount - prev.amount;
+  return { quality: "ok", amount, anomaly: amount < 0 ? "negative" : null, fxRate: next.fxRate ?? null, upstreamSource };
+}

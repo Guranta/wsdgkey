@@ -470,6 +470,30 @@ export async function ensureReady(): Promise<void> {
       ]);
       await addMissingColumns(db, "users", [["locale", "TEXT"]]);
       await addMissingColumns(db, "billing_rows", [["binding_id", "TEXT"]]);
+      // 可插拔计费源（docs/plans/2026-11-05-billing-pluggable.md §9）：旧行这些列为空，走旧渲染。
+      await addMissingColumns(db, "billing_rows", [
+        ["billing_source", "TEXT"],
+        ["quality", "TEXT"],
+        ["amount_usd", "REAL"],
+        ["fx_rate", "REAL"],
+        ["upstream_source", "TEXT"],
+      ]);
+      await db.exec(`CREATE TABLE IF NOT EXISTS billing_snapshots (
+        channel_id TEXT NOT NULL,
+        day TEXT NOT NULL,
+        source_id TEXT NOT NULL,
+        quality TEXT NOT NULL,
+        amount REAL,
+        unit TEXT NOT NULL,
+        fx_rate REAL,
+        upstream_source TEXT,
+        state TEXT,
+        stale INTEGER,
+        as_of TEXT,
+        pulled_at INTEGER NOT NULL,
+        note TEXT,
+        PRIMARY KEY (channel_id, day, source_id)
+      )`);
       await addMissingColumns(db, "recon_rows", [["binding_id", "TEXT"]]);
       await addMissingColumns(db, "gateways", [
         ["disabled", "INTEGER NOT NULL DEFAULT 0"],
