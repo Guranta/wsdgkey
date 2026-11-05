@@ -1,0 +1,317 @@
+# 供应商 JWT 网关适配计划
+
+日期：2026-11-05。状态：计划。本文件不改应用代码。
+
+配套：[可插拔计费源](2026-11-05-billing-pluggable.md)、[验收用例](2026-11-05-billing-acceptance.md)（含 TBD 共 53 条，必过 50 条）。
+
+站点称「供应商 JWT 站」或供应商 IP 主机 `18.139.109.234`。文档不写密码、令牌、cookie 或渠道数字 ID。
+
+## 1. 背景与目标
+
+上号器今天有两种网关：
+
+| `gateways.kind` | 登录 | 渠道路径 | 账单 |
+| --- | --- | --- | --- |
+| `newapi_admin` | 系统访问令牌 + `New-Api-User` | `/api/channel/` | 源 B，日志对账 |
+| `newapi_seller` | 账号密码换短令牌，刷新 cookie | `/api/seller/channel/` | 源 A，`used_quota` 快照 |
+
+供应商 JWT 站是第三种。2026-11-05 只读核对：QuantumNous New API 供应商分支，版本 `development-supplier-ee3071cad28e`，账号 role=5。它不是 ainow（`/api/seller/*` 在该站 404），也不是管理令牌网关。
+
+目标：新增网关种类 `newapi_supplier`（界面名「供应商 JWT」）。复用现有登录态存储和每网关一把锁，单独写路径、能力、证书和计费源。渠道列表能导入约 601 条，区分可管理与仅可见，并且不把供应商做不到的按钮露出来。
+
+## 2. 已核对的事实
+
+| 点 | 结论 |
+| --- | --- |
+| 登录 | `POST /api/user/login`，JSON 账号密码。返回 JWT、`access_expires_at`、`session.sid`，并种 `new_api_refresh` |
+| 访问令牌 | 约 900 秒。业务请求 `Authorization: Bearer`。不送 `New-Api-User` |
+| 刷新 | `POST /api/user/auth/refresh`，cookie `new_api_refresh` + 头 `X-Auth-Session`。cookie 会旋转，必须存新的 |
+| Origin | 刷新不带该站允许的 `Origin` 时 403，正文可见 `request origin is not allowed`（亦记为 `AUTH_ORIGIN_FORBIDDEN`）。同时带 `Referer` |
+| 渠道 | `/api/channel/*`。`POST /api/channel` 不带斜杠会 307，客户端 `redirect: manual`，所以创建必须打 `/api/channel/` |
+| 能力 | `GET /api/supplier/v1/profile` 给出 kinds、actions、editable_fields。没有 `/api/seller/*` |
+| 规模 | 列表 total 601。2026-11-05 聚合：status 1→83、2→35、3→483。类型 41 最多 |
+| 创建 | `{mode:"single", channel}` 可以成功。站点给名称加上 `supplier_label-` 前缀 |
+| 删除 / 手动启停 | 本账号被拒，文案要求联系平台管理员。profile 里 `newapi`、`azure` 即使列出 enable/disable/delete/test，也以实机拒绝为准 |
+| 测试 | 不对线上渠道调用 `GET /api/channel/test/:id`。无权限时隐藏入口 |
+| `owned` | 列表行带 `owned`。抽样见过 `false`。全量里 `true` 有多少见下文，未验证 |
+| 额度 | 抽样 `used_quota` 恒为 0。日消耗走计费源 C，见账单计划 |
+| TLS | 该主机是 IP + 自签 HTTPS |
+| 限流头 | 未见 `X-RateLimit-*`。刹车在我们自己的队列 |
+
+profile 上观察到的 kind：`anthropic`、`bedrock_iam`、`bedrock_apikey`、`newapi`、`openai`、openrouter、`azure`、`vertex`。actions 随 kind 变。授权由站点「Supplier Authorization」控制，会变，每次同步重读 profile，不把矩阵写死。
+
+`GET /api/group/` 可用。列表上的 `keyword` 不可靠，搜索走 `GET /api/channel/search`。批量、tag、multi_key、codex、update_balance 当管理残留，本种类不调用。
+
+## 3. 网关类型
+
+`kind = newapi_supplier`。不要塞进 `newapi_seller`，也不要要求管理员填 Access Token。
+
+设置抽屉在「New API（管理令牌）」和「供应商账号」旁增加「供应商 JWT」。保存前必须测试连接（AUTH-S-01）。管理令牌和 `New-Api-User` 输入框不渲染。
+
+复用列（已在 `lib/db.ts` 的 `gateways` 上）：`password_cipher`、`refresh_cookie_cipher`、`session_sid_cipher`、`access_token_cipher`、`access_expires_at`、`auth_status`、`auth_error`、`owner_user_id`。密码和会话材料继续走 `lib/secret-box.ts` 的 AES-256-GCM。接口、页面、日志都不回明文（AUTH-S-02、SEC-S-01）。
+
+建议新列，启动时 `addMissingColumns`，SQLite 与 Postgres 同一套：
+
+| 列 | 用途 |
+| --- | --- |
+| `allowed_origin` | 刷新时发送的 Origin。默认取该网关站点根的 origin，用户不填 |
+| `supplier_label` | profile 的标签，只用于解释创建后的名称前缀 |
+| `profile_cache` | profile JSON 缓存。不得含令牌 |
+| `tls_exception_host` | 允许证书例外的主机名，必须等于 `base_url` 的 host。空表示严格校验 |
+
+本种类不读 ainow 的 `can_write` / `max_channels`。该站列表没有这些字段。上限以 profile 将来若真返回为准；没有该字段时，不要显示「已达站点上限」，也不要写死一个数。
+
+## 4. 鉴权生命周期
+
+落点：扩展 `lib/seller-auth.ts`，或抽出共用的会话管理，由 `newapi_supplier` 走同一套锁。`lib/gateway-adapter.ts` 按 kind 分路径。不要让 supplier 请求打到 `/api/seller/*`。
+
+1. 测试连接和保存时 `POST /api/user/login`。验证码或 MFA 沿用现有分类，记「需要人工处理」，不当成密码错误。该站 `turnstile_check` 为 false，分类器仍保留。
+2. 访问令牌剩余不足 60 秒（现有 `SELLER_RENEW_WITHIN_MS`）就先刷新。刷新串行（现有 `withGatewayLock`），成功后立刻写回旋转过的 cookie 和 sid。
+3. 刷新请求带 `Origin` 和 `Referer`，值都是该网关站点自身的 origin（此主机为 `https://18.139.109.234`）。浏览器不直连供应商站，所以这个头是代理自己加的。
+4. 刷新 401，或 Origin 被拒：不要循环刷刷新。按现有上限用密码再登录一次（`seller_login_attempts`，每小时 3 次，刷新不计次）。仍失败则 `auth_status=failed`，顶部黄条，停止（AUTH-S-06、AUTH-S-07、AUTH-S-08）。
+5. 业务请求 401 只强制刷新一次再重试，与现在的 `sellerRequest` 相同。
+6. 登录会新建会话。失败路径禁止紧循环登录。不要在刷新失败时调用 logout。
+
+码农注：设计稿的说明文字写「把上号器前端 Origin 配进该站白名单」。已核对的拒绝条件是代理没带**站点允许的 Origin**（站点自己的源）。v1 不在表单加 Origin 输入框；代理把 Origin/Referer 设成网关根 origin。若仍返回 Origin 拒绝，把站点原文给用户，不改去送控制台域名。
+
+## 5. TLS
+
+Node 的 `fetch` 拒绝自签证书。全局 `NODE_TLS_REJECT_UNAUTHORIZED=0` 不能开。
+
+例外只绑 `tls_exception_host` 这一台主机：该网关的请求使用 `rejectUnauthorized: false` 的 dispatcher，其他网关仍严格校验。主机和 `base_url` 不一致就不套用例外。
+
+设置页按设计只放黄字说明，不放「忽略证书」勾选。例外记在该网关的服务端字段里，由部署这个主机的人打开，界面不把它做成一颗通用开关。测试连接在例外生效后应成功（CH-S 的 TLS 预期、验收 AUTH 保存前的连接测试）。证书换成受信任证书后清空 `tls_exception_host`。
+
+## 6. 渠道、owned、按钮
+
+适配器路径：
+
+| 动作 | 路径 | v1 |
+| --- | --- | --- |
+| 列表 | `GET /api/channel/` | 要。`page_size=20` |
+| 搜索 | `GET /api/channel/search` | 本地导入之后的搜索仍走本库 |
+| 详情 | `GET /api/channel/:id` | 列表缺字段时才拉 |
+| 创建 | `POST /api/channel/` `{mode:"single", channel}` | 第二阶段，见下 |
+| 更新 | `PUT /api/channel/` | 仅 `owned=true` 且 profile 允许的字段 |
+| 删除 | `DELETE /api/channel/:id` | 不调用。API 层直接拒绝 |
+| 启停 | `POST /api/channel/:id/status` | 不调用。API 层直接拒绝 |
+| 测试 | `GET /api/channel/test/:id` | 默认不调用 |
+
+按钮（本种类）：
+
+- 行内、批量、抽屉三处都没有「测试」。无权限时给「站点未开放」，不要点下去再 403，也不要自动重试测试（CH-S-07）。保存后、启用后的自动测试在本种类关掉。
+- 「删除」「手动禁用」「启用」隐藏，且本站 API 拒绝，避免只藏按钮（CH-S-05、CH-S-06）。
+- 「修改」只在 `owned=true` 且该 kind 的 `editable_fields` 允许时出现。
+- `owned=false`：只读。名称旁灰 pill「不可管」，操作列是「只读」，复选框禁用。原因用站点能表达的那句（不可管 / 联系管理员），不要只剩一个灰色图标。
+- profile 日后若开放某动作，入口跟着 profile **和** `owned=true` 一起出现（CH-S-08）。删除和手动启停在本账号实机拒绝被推翻之前，继续隐藏。
+- 列表只读展示 `other_info.status_reason`（欠费、已封禁、密钥重复等）以及 `customer_billing` 的 source、state、汇率（CH-S-09）。`used_quota` 恒为 0，详情不得把它当成今日消耗（CH-S-10）。
+- 导入登记的是供应商列表 id。`supplier_publication.customer_channels` 里的客户侧 id 不另建行。日志行上的 channel 可能是客户侧 id，统计口径见账单计划，适配器不要把两种 id 加总。
+
+上游 id 已见到超过 1e12，仍在 JS 安全整数内。解析后若 `Number` 往返不一致，该行算失败，不入库。
+
+创建表单对齐库存 New API 的字段布局，按 `editable_fields` 裁剪。测试按钮不放。名称可能被站点改成带 `supplier_label-` 的前缀，保存后的提示说明这一点，客户端不要自己再加一遍前缀。
+
+创建放到第二阶段：探针渠道还在，且「创建之后 `owned` 是不是 true」尚未验证。形态试验只打我们自己的测试网关。供应商 JWT 站上线前不再为探形状而创建渠道。
+
+### owned 验证结果
+
+状态：**未验证**。下面的格子等全量数字到达后再填。不要用抽样代替，也不要写成 0。
+
+| 项 | 结果 |
+| --- | --- |
+| 约 601 条里 `owned=true` 的条数 | 未验证 |
+| `owned=false` 的条数 | 未验证 |
+| 创建新渠道后 `owned` 是否为 true | 未验证。若名为 `xiaolou-01-wsdgkey-probe-should-fail` 的行还在，只读看列表上的 `owned`，不要再创建、不要测试、不要改状态 |
+| 抽样 | 只读抽样见过 `owned=false`。这不是全量计数 |
+
+### 导入默认勾选（未决）
+
+导入必须带上 `owned`，并把清单分成「可管理」（`owned=true`）和「仅可见」（`owned=false`）。摘要写成「导入 n（可管 a · 仅可见 b）· 跳过 · 失败」。
+
+默认勾哪一组，等上面的数字，以及创建是否得到 `owned=true`：
+
+- 方案甲：默认只勾可管理。
+- 方案乙：默认勾全部可见行。
+
+两条都还不能定。实现不要写死「默认全选」或「默认只选可管理」。数字到达前，导入确认必须由操作者显式勾选，不预选。验收 CH-S 的导入数量以最终勾选为准；勾选策略本身等本小节补完再判。
+
+被导入的行才进入计费。默认勾选因此也决定谁进账单，和计费计划里的导入基线是同一道门。
+
+## 7. 导入策略
+
+复用「导入已有渠道」的语义（`lib/channel-service.ts` 的 `importSellerChannels`）：只写本地行，不 PUT、不 POST、不改状态。自动禁用保持 status 3。重复导入按 `(gateway_id, upstream_id)` 跳过，不重置基线、不改 `imported_at`。
+
+和 ainow 导入的差别：
+
+- 按本种类的列表路径拉，不走 `/api/seller/channel/`。
+- 写入 `channels.owned` 和 `supplier_kind`。`origin=imported`，`created_here=1`，`create_baseline` 保持 NULL。禁止调用 `snapshotCreateBaseline(used_quota)`：该站累计额度恒为 0，写进去会变成假基线。
+- 页大小 20（满足验收 page_size≤100）。按返回的 total 翻页，不要沿用 seller 导入 `page<=50` 的硬顶当业务上限；601 条约 31 页，50 页碰巧够，站点再涨就会截断。
+- 本网关并发默认 2，每分钟不超过 60。这落在验收「并发 ≤3、≤60/min」里，并和设计稿写死的「并发 2」一致。
+- 进度：已处理 n / 总数。完成后三格汇总，失败带站点原文。进行中的结果要能在结束后看到。
+- 名称精确等于 `xiaolou-01-wsdgkey-probe-should-fail` 的行跳过，不导入、不进账单。这样的行有三条，都删不掉。
+
+列表展示仍服务端分页 20。不要一次把 601 行画进 DOM。
+
+## 8. 运维债：探针渠道
+
+形状试验时创建了三条渠道，名称都是 `xiaolou-01-wsdgkey-probe-should-fail`。供应商不能删除，也不能手动禁用。上线前请**站点管理员**删除。上号器不提供删除按钮，也不要再探测创建。
+
+以后的探针默认只读。创建形态的试验只在我们自己的测试网关做。验收不依赖这三条，也不去调用它们。
+
+## 9. 表结构影响（网关侧）
+
+只加列，不改旧 kind 的行。
+
+`gateways`：第 3 节的四列。`kind` 已是 TEXT，写入 `newapi_supplier` 即可。
+
+`channels`：
+
+| 列 | 用途 |
+| --- | --- |
+| `owned` | `NULL` 未核对，`0` 仅可见，`1` 可管理 |
+| `supplier_kind` | profile 的 kind 名，如 `openai` |
+
+账单快照表放在计费计划里，列表同步不写快照。渠道行上可以缓存最近一次见到的 `customer_billing` 状态供列表 pill 使用，权威读数以快照表为准。
+
+现有 `importSellerChannels`、`gatewayApi` 的 `kind === "newapi_seller"` 分支不要顺便改行为。本种类走新分支。
+
+## 10. 工作拆分
+
+| 序号 | 内容 | 量级 | 依赖 |
+| --- | --- | --- | --- |
+| G1 | kind、设置表单、密文字段复用、i18n 中英 | M | — |
+| G2 | 登录 / 刷新 / Origin / Referer / 限频 | M | G1 |
+| G3 | 单主机 TLS 例外 | S | G1 |
+| G4 | `/api/channel` 适配器 + profile | M | G2 |
+| G5 | owned 拆分、隐藏测试/删除/启停、API 层拒绝 | M | G4 |
+| G6 | 导入、进度、跳过探针名、并发 2 | M | G4、G5 |
+| G7 | 用假上游做的测试，不对供应商站写 | M | G2–G6 |
+| G8 | 创建表单（无测试按钮） | M | G5，且第 6 节的 owned 验证已填 |
+
+G6 可以和计费计划的源 C 并行，但源 C 要等 G4 能读出 `customer_billing`。不要在 G8 之前对供应商站创建渠道。
+
+## 11. 上线顺序与回滚
+
+1. 本文件只是文档，合并后进程不变。
+2. 应用代码上线前，先处理计费计划里的线上分叉（`VERSION` 的 `1076446` 与 `main` 的 `320f31c`）。
+3. 先上 kind + 鉴权 + TLS + 只读列表。导入在 owned 默认勾选写明之前，用显式勾选。
+4. 计费源 C 按计费计划的开关打开。
+5. 创建按钮最后开，并先在自有测试网关验证。
+6. 上线前确认探针渠道已由站点管理员删除，或仍被名称规则跳过。
+
+回滚：禁用该网关行；清空 `tls_exception_host` 后此主机恢复严格证书校验（连不上是预期）；新列留着，旧 kind 不读它们。不删历史渠道行。
+
+## 12. 验收对照
+
+用例全文在 [验收用例](2026-11-05-billing-acceptance.md)。本网关直接对应 AUTH-S-01～08、CH-S-01～10、SEC-S-01～04，以及 SCALE-01。计费与对账的判定在计费计划。
+
+## 13. 待决
+
+1. 导入默认勾选：只可管理，还是全部可见。等「owned 验证结果」。
+2. 约 601 条里 `owned=true` 的全量数字，以及创建是否得到 `owned=true`。
+3. 设计说明里的「前端 Origin 白名单」与已核对的「代理发送站点自身 Origin」以第 4 节为准。若站点后来要求别的 Origin，再加字段。
+4. 创建是否进入第一期。本计划放在 G8。
+
+## 14. 非目标
+
+- 本 PR 不改应用代码。
+- 调研和验收都不对供应商站做新的写操作。不删除探针（删不掉）。
+- 不实现 CPA，不把站点钱包余额当结算。
+- 不把本站塞进 ainow 或管理令牌的种类里。
+
+## 界面（设计）
+
+以下保持设计 2026-11-05 的措辞。
+
+### 1. 新增网关类型「供应商 JWT」
+
+在设置 › 网关 › 添加网关抽屉，类型分段在现有 `New API（管理令牌）` / `供应商账号` 旁增加第三项 **「供应商 JWT」**（描边小标同「供应商账号」）。
+
+| 字段 | 规则 |
+| --- | --- |
+| 名称 | 必填；默认按站点主机名自动生成（如 `jwt-18-139-…`），**用户可改**；hint「默认按站点自动生成，可修改」 |
+| 站点地址 | 必填；根地址，结尾不要 `/v1`（黄字警告不拦截） |
+| 账号 | 必填；供应商登录名（role=5） |
+| 密码 | 必填；`type=password` + 显示切换；保存后不回显、不回传前端；仅用于换 JWT 与刷新 |
+| Origin 提示 | 静态灰字：「刷新令牌要求请求带站点允许的 Origin；错误 Origin 会返回 AUTH_ORIGIN_FORBIDDEN。部署时把上号器前端 Origin 配进该站白名单。」无单独输入框（除非码农确认要可配） |
+| 自签证书 | 黄提示条：「该站若以 IP + 自签证书提供 HTTPS，拉取代理需为该主机配置证书例外，否则测试连接会失败。」不提供「忽略证书」勾选（安全；由运维/代理配置） |
+| 测试连接 | **必做**后才能保存（同 §9.6.1）；成功显示「已登录 · XXms」+「JWT 约 15 分钟 · 剩余不足 60 秒自动刷新」（具体阈值以码农实现为准，设计文案写「短时 JWT + 自动刷新」） |
+| 管理令牌字段 | **隐藏**（本类型不用 Access Token） |
+
+网关列表行：名称旁 `供应商 JWT` 小标；状态 pill：`已连接` / `令牌失效` / `续期失败`（续期失败出顶部黄横幅，文案结构同 §9.6.1，原因用站点原文）。
+
+### 2. 渠道列表与操作可见性（本类型强制）
+
+| 操作 | 供应商 JWT 网关下 |
+| --- | --- |
+| 行内「测试」 | **隐藏**（站点对 supplier 测渠道返回 403） |
+| 抽屉「测试连接」 | **隐藏** |
+| 行内 / 批量「删除」 | **隐藏**（供应商不可删） |
+| 行内 / 批量「手动禁用」「启用」 | **隐藏**（供应商不可手动禁用/启用） |
+| 「修改」 | 仅 `owned===true`（可管）行显示；不可管行不提供 |
+| 「添加渠道」 | 若站点有上限：达限置灰 + tooltip「已达站点上限」（上限按站点 `max_channels` 实时读，不写死） |
+| 「导入已有渠道」 | 显示（见下） |
+
+抽屉顶部灰说明：「此网关为供应商 JWT，部分字段与操作不可用」。字段裁剪可对齐 §9.6.2（隐藏优先级/权重/自动封禁/参数覆盖等），以码农对接的可写字段为准；设计默认先藏写不进的项。
+
+### 3. owned / 可见可管拆分（导入与列表）
+
+- 导入与列表必须区分：**可见**（能看见）vs **可管**（`owned===true`，可改配置）。
+- 不可管行：名称旁灰 pill「不可管」；操作列仅「—」或「只读」；复选框禁用，不进入批量。
+- 导入结果表增加列「权限」：可管 / 仅可见；摘要可写「导入 n（可管 a · 仅可见 b）· 跳过 · 失败」。
+- 禁止在不可管行上露出启用/禁用/编辑入口（含 hover 才出现的图标）。
+
+### 4. 导入约 601 渠道
+
+- 按钮「导入已有渠道」可重复；已导入 ID 跳过。
+- 进行中：模态或顶栏进度「已处理 n/601 · 并发 2 · 预计剩余约 x 分钟」；不可关闭导致状态丢失（可后台继续，回列表后可「查看上次导入结果」——若一期不做，至少 toast 保留汇总）。
+- 完成：三格 导入 / 跳过 / 失败 + 失败原文；注脚「导入不修改渠道设置与状态；计费从导入后第一个 0:00 快照起算」。
+
+### 5. customer_billing 相关 pills
+
+| Pill | 条件 | 色 | 出现位置 |
+| --- | --- | --- | --- |
+| 客户账单 / customer_billing | 该行计费源为 C | 青软底（同「快照计费」） | 渠道名旁、账单行旁 |
+| ready | `state=ready` 且非 stale | 可不打或绿点 | 余额/计费单元格旁 |
+| 源不可用 | `state=unavailable` | 棕 | 账单与渠道 |
+| 过期 | `stale===true` | 橙 | 账单与渠道 |
+| 导入 | 经导入登记 | 灰 | 渠道名、账单行 |
+
+金额格规则同计费源文档：异常不显示 $0。
+
+### 6. 账单与对账（本网关）
+
+- **日用量权威**：`customer_billing.amount_usd` 的 0:00 快照差（计费源 C）。
+- **对账页**：选中本网关 → 直接账单视图（每渠道每日快照差），无「一致/异常」总览。
+- **日志辅助**：若渠道级 log/stat 可用，账单/对账表可增可选列「日志辅助」（非权威）；不可用则整列隐藏或全「—」，**不**因此打异常红。
+- **测试消耗行**：不显示。
+- **汇率**：环图与表头标明使用的是 `customer_billing.rate` 还是 status USD rate（见计费源文档）。
+
+### 7. 线框 / hash 建议（设计后续可补截图）
+
+| 场景 | 建议 hash（线框） |
+| --- | --- |
+| 新增网关 JWT 表单 | `#admin/settings/gw-jwt` |
+| 续期失败横幅 | `#admin/settings/jwt-renewfail` |
+| 渠道列表（无测试/删除/禁用，含不可管） | `#admin/channels/jwt` |
+| 导入进度/结果 | `#admin/channels/jwt-import` |
+| 对账=账单 + 可选日志辅助列 | `#admin/recon/jwt` |
+
+（实现前以码农计划为准；此处仅设计占位。）
+
+## 评审意见
+
+### 设计
+
+1. **403 测试**：测试入口必须从行内、批量、抽屉三处都拿掉，避免「点了再报错」。验收用供应商角色扫 DOM，不应出现「测试」按钮。
+2. **删除 / 手动禁用**：同理隐藏；若后端仍暴露接口，前端隐藏不够——需码农在 API 层拒绝，设计只保证无入口。
+3. **假「全部一致」**：本网关对账禁止一致 donut；有 log/stat 也只能做「日志辅助」列。
+4. **owned===false**：导入与列表都要可见/可管拆分；不可管行无改删启停。漏做会导致供应商点编辑后大面积 403。
+5. **601 导入**：无进度与限流提示时，用户会以为卡死；并发文案写死「并发 2」以免被当成故障。
+6. **证书与 Origin**：表单用说明文字，不提供「忽略 TLS」勾选；Origin 白名单是部署项，UI 只提示 AUTH_ORIGIN_FORBIDDEN 含义。
+7. **与 ainow「供应商账号」并列**：二者都是供应商向网关，但登录态（账号密码换 JWT vs seller token）与计费源（C vs A）不同，类型名与小标必须区分，避免设置页混淆。
+8. **文案**：新增字符串中英双语、遵守 §14 不截断不溢出；英文由码农写入 i18n。
+
+### 测试
+
+待填写。验收用例见 [2026-11-05-billing-acceptance.md](2026-11-05-billing-acceptance.md)。
