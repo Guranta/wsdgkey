@@ -15,7 +15,7 @@ type GatewayOption = {
   demo: boolean;
   baseUrl?: string;
   disabled?: boolean;
-  kind?: "newapi_admin" | "newapi_seller";
+  kind?: "newapi_admin" | "newapi_seller" | "newapi_supplier";
   canWrite?: boolean;
   canToggle?: boolean;
   maxChannels?: number;
@@ -30,6 +30,7 @@ type ImportResult = { imported: number; skipped: number; failed: number; failure
 type Creator = { id: string; name: string; username: string };
 type ChannelItem = DrawerChannel & {
   upstreamId: number;
+  owned: number | null;
   typeName: string;
   beforeQuota: number | null;
   todayQuota: number | null;
@@ -211,6 +212,7 @@ export function ChannelsView() {
 
   const selectedGateway = data?.gateways.find((item) => item.id === gateway);
   const sellerGateway = selectedGateway?.kind === "newapi_seller";
+  const supplierGateway = selectedGateway?.kind === "newapi_supplier";
   const liveCap = sellerGateway ? cap : null;
   const atLimit = Boolean(liveCap && liveCap.maxChannels > 0 && liveCap.total >= liveCap.maxChannels);
   const canToggle = !sellerGateway || liveCap?.canToggle !== false;
@@ -414,10 +416,10 @@ export function ChannelsView() {
                   return <option key={item.id} value={item.id}>{item.name}{host ? ` · ${host}` : ""}{item.demo ? ` · ${common("demo")}` : ""}</option>;
                 })}
               </select>
-              <span title={!gateway ? t("addDisabledTip") : atLimit ? t("atSiteLimit") : undefined}>
+              <span title={!gateway ? t("addDisabledTip") : atLimit ? t("atSiteLimit") : undefined} className={supplierGateway ? "hidden" : undefined}>
                 <button type="button" className={buttonClass("primary", "h-9")} onClick={() => setDrawer("add")} disabled={!gateway || atLimit || (sellerGateway && liveCap?.canWrite === false)}>{t("add")}</button>
               </span>
-              {sellerGateway ? <button type="button" className={buttonClass("secondary", "h-9")} disabled={importing || !gateway} onClick={() => void runImport()}>{importing ? t("loading") : t("importExisting")}</button> : null}
+              {sellerGateway || supplierGateway ? <button type="button" className={buttonClass("secondary", "h-9")} disabled={importing || !gateway} onClick={() => void runImport()}>{importing ? t("loading") : t("importExisting")}</button> : null}
               <div className="ml-auto">
                 <button type="button" className={buttonClass("ghost", "h-9 text-sm")} onClick={() => setFiltersOpen((value) => !value)}>{filtersOpen ? t("collapse") : t("filtersCollapsed")}</button>
               </div>
@@ -505,7 +507,7 @@ export function ChannelsView() {
                     const dot = tone === "ok" ? "bg-ok" : tone === "danger" ? "bg-danger" : tone === "warn" ? "bg-warn" : "bg-muted";
                     return (
                       <tr key={item.id} className="group border-t border-line hover:bg-hover">
-                        <td className="px-4 py-3.5"><input type="checkbox" checked={selected.includes(item.id)} onChange={(event) => setSelected((current) => event.target.checked ? [...current, item.id] : current.filter((id) => id !== item.id))} aria-label={t("selectRow", { name: item.name })} /></td>
+                        <td className="px-4 py-3.5"><input type="checkbox" disabled={supplierGateway && item.owned !== 1} checked={selected.includes(item.id)} onChange={(event) => setSelected((current) => event.target.checked ? [...current, item.id] : current.filter((id) => id !== item.id))} aria-label={t("selectRow", { name: item.name })} /></td>
                         <td className="whitespace-nowrap px-4 py-3.5 font-mono text-[13px] text-muted">#{item.upstreamId}</td>
                         <td className="whitespace-nowrap px-4 py-3.5 font-medium">
                           <span className="inline-flex items-center gap-2">

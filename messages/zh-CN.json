@@ -170,7 +170,9 @@
     "sellerAuthFailed": "供应商账号连接异常",
     "atSiteLimit": "已达站点上限",
     "sellerCannotWrite": "这个供应商账号不能添加或修改渠道",
-    "sellerCannotToggle": "这个供应商账号不能启用或禁用渠道"
+    "sellerCannotToggle": "这个供应商账号不能启用或禁用渠道",
+    "supplierNotOwned": "该渠道仅可见，供应商账号不可修改",
+    "supplierForbidden": "该站点未开放此操作"
   },
   "channels": {
     "loading": "正在读取渠道…",
@@ -321,7 +323,8 @@
       "limitAdmin": "单渠道 {per}/分 · 限流可在 设置 › 拉取限流 调整",
       "limitPlain": "单渠道 {per}/分",
       "supplierLimit": "限流由管理员配置"
-    }
+    },
+    "readonlyTag": "不可管"
   },
   "drawer": {
     "editTitle": "修改 {name}",

@@ -38,6 +38,8 @@ export type ChannelView = {
   id: string;
   gatewayId: string;
   upstreamId: number;
+  /** 供应商 JWT 网关：1 可管理，0 仅可见，null 其他网关。 */
+  owned: number | null;
   name: string;
   type: number;
   typeName: string;
@@ -115,6 +117,7 @@ function view(row: ChannelRow, baseline: number | null): ChannelView {
     id: String(row.id),
     gatewayId: String(row.gateway_id),
     upstreamId: Number(row.upstream_id),
+    owned: row.owned === null || row.owned === undefined ? null : Number(row.owned),
     name: String(row.name ?? ""),
     type: Number(row.type ?? 0),
     typeName: channelTypeName(Number(row.type ?? 0)),

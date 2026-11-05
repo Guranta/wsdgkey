@@ -170,7 +170,9 @@
     "sellerAuthFailed": "Supplier account connection failed",
     "atSiteLimit": "Site channel limit reached",
     "sellerCannotWrite": "This supplier account cannot add or edit channels",
-    "sellerCannotToggle": "This supplier account cannot enable or disable channels"
+    "sellerCannotToggle": "This supplier account cannot enable or disable channels",
+    "supplierNotOwned": "This channel is read-only for this supplier account",
+    "supplierForbidden": "The site does not allow this action"
   },
   "channels": {
     "loading": "Loading channels…",
@@ -321,7 +323,8 @@
       "limitAdmin": "{per}/min per channel · change this in Settings › pull limits",
       "limitPlain": "{per}/min per channel",
       "supplierLimit": "Rate limits are set by an admin"
-    }
+    },
+    "readonlyTag": "Read-only"
   },
   "drawer": {
     "editTitle": "Edit {name}",
