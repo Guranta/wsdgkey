@@ -1,10 +1,12 @@
 import { deriveBaseline, reconcileFinding, resolveConsumption, todayExcludingTests, type BaselinePoint } from "./billing-math";
+import { CALLS_PER_CHANNEL, LIST_SYNC_RESERVE_PER_MIN, type PlanChannel } from "./billing-plan";
 import { channelTypeName } from "./channel-types";
 import { QUOTA_PER_DOLLAR } from "./format";
 import { dbAll, dbGet, dbRun } from "./db";
 import { getGateway } from "./gateways";
 import { syncReconChannel } from "./recon-service";
 import { rebindMarkers } from "./rebind";
+import { rateLimits } from "./settings";
 import { addDays, formatShanghaiTime, logWindow, shanghaiClock, shanghaiMidnight } from "./shanghai";
 import type { SessionUser } from "./types";
 import { fetchUpstreamChannel, testLogQuota, todayQuota, UpstreamFailure } from "./upstream";
@@ -61,7 +63,8 @@ export async function pullChannelBaseline(channelId: string, baselineDay: string
     const dayStart = shanghaiMidnight(baselineDay);
     let today = remote?.todayFromPayload ?? null;
     if (today === null) today = await todayQuota(gateway, upstreamId, dayStart, Date.now());
-    if (today !== null) {
+    // 今日日志为 0 时测试日志必为 0，跳过两次查询（空闲渠道从最坏 4 个请求降到 2 个）
+    if (today !== null && today > 0) {
       const tests = await testLogQuota(gateway, upstreamId, dayStart, Date.now());
       today = todayExcludingTests(today, tests ?? 0);
     }
@@ -260,24 +263,47 @@ export async function ensureBillingRun(now = new Date()): Promise<{ baselineDay:
   return { baselineDay, billDay, status: String(latest?.status ?? "collecting") };
 }
 
-export async function channelsMissingBaseline(baselineDay: string): Promise<string[]> {
+/** 缺基线渠道及其计划字段：大额消耗优先，带上连续失败计数和最近失败时间供退避。 */
+export async function missingBaselineChannels(baselineDay: string): Promise<PlanChannel[]> {
   const rows = (await dbAll(
-    `SELECT c.id FROM channels c
+    `SELECT c.id, c.gateway_id, c.used_quota, c.created_at, c.consecutive_failures, a.updated_at AS last_failed_at
+     FROM channels c
      LEFT JOIN channel_baselines b ON b.channel_id = c.id AND b.day = ?
-     WHERE c.created_here = 1 AND b.channel_id IS NULL`,
-    [baselineDay],
-  )) as { id: string }[];
-  return rows.map((row) => row.id);
+     LEFT JOIN billing_attempts a ON a.channel_id = c.id AND a.baseline_day = ? AND a.status = 'failed'
+     WHERE c.created_here = 1 AND b.channel_id IS NULL
+     ORDER BY c.used_quota DESC, c.created_at DESC`,
+    [baselineDay, baselineDay],
+  )) as Row[];
+  return rows.map((row) => ({
+    id: String(row.id),
+    gatewayId: String(row.gateway_id),
+    usedQuota: Number(row.used_quota ?? 0),
+    createdAt: Number(row.created_at ?? 0),
+    consecutiveFailures: Number(row.consecutive_failures ?? 0),
+    lastFailedAt: row.last_failed_at === null || row.last_failed_at === undefined ? null : Number(row.last_failed_at),
+  }));
 }
 
-export async function billingView(actor: SessionUser, unsyncedOnly: boolean) {
+export type BillingViewOptions = {
+  unsyncedOnly?: boolean;
+  /** 指定账单日（bill_day，上海时区 YYYY-MM-DD）；缺省 = 最新一期已发布账单。 */
+  day?: string | null;
+  /** 管理员按供应商筛选（用户 id）；供应商恒定只能看自己。 */
+  supplierId?: string | null;
+};
+
+export async function billingView(actor: SessionUser, options: BillingViewOptions = {}) {
+  const unsyncedOnly = options.unsyncedOnly === true;
   const clock = shanghaiClock();
   const live = await dbGet("SELECT * FROM billing_runs WHERE baseline_day = ?", [clock.day]);
-  const published = (await dbAll("SELECT * FROM billing_runs WHERE status = 'published' ORDER BY bill_day DESC LIMIT 1")) as Row[];
-  const showing = published[0];
+  const showing = options.day
+    ? ((await dbAll("SELECT * FROM billing_runs WHERE bill_day = ? ORDER BY status = 'published' DESC LIMIT 1", [options.day])) as Row[])[0]
+    : ((await dbAll("SELECT * FROM billing_runs WHERE status = 'published' ORDER BY bill_day DESC LIMIT 1")) as Row[])[0];
   const billDay = showing ? String(showing.bill_day) : null;
-  const scope = actor.role === "admin" ? "" : "AND c.creator_user_id = ?";
-  const scopeParams = actor.role === "admin" ? [] : [actor.id];
+  const scopedToSupplier = actor.role !== "admin" || Boolean(options.supplierId);
+  const scopeSupplier = scopedToSupplier ? "AND c.creator_user_id = ?" : "";
+  const scopeParams = scopedToSupplier ? [actor.role === "admin" ? String(options.supplierId) : actor.id] : [];
+  const scope = scopeSupplier;
   const rows = billDay
     ? ((await dbAll(
         `SELECT r.*, c.name, c.group_name, c.balance, c.used_quota, c.today_quota, c.type, u.name AS creator_name
@@ -312,6 +338,13 @@ export async function billingView(actor: SessionUser, unsyncedOnly: boolean) {
   const counts = live
     ? await scopedCounts(String(live.baseline_day), actor)
     : { total: 0, ok: 0, failed: 0 };
+  let etaMinutes: number | undefined;
+  if (live?.status === "collecting" && counts.total > counts.ok) {
+    const limits = await rateLimits();
+    const gateways = (await dbAll("SELECT id FROM gateways WHERE disabled = 0")) as Row[];
+    const perMin = Math.max(1, limits.gatewayPerMin - LIST_SYNC_RESERVE_PER_MIN) * Math.max(1, gateways.length);
+    etaMinutes = Math.max(1, Math.ceil(((counts.total - counts.ok) * CALLS_PER_CHANNEL) / perMin));
+  }
   const failedIds = live
     ? ((await dbAll(
         `SELECT a.channel_id FROM billing_attempts a JOIN channels c ON c.id = a.channel_id
@@ -321,8 +354,16 @@ export async function billingView(actor: SessionUser, unsyncedOnly: boolean) {
     : [];
   return {
     copy: "schedule",
+    requestedDay: options.day ?? null,
     collecting: live?.status === "collecting",
-    progress: counts,
+    suppliers:
+      actor.role === "admin"
+        ? ((await dbAll(
+            `SELECT DISTINCT u.id, u.name FROM channels c JOIN users u ON u.id = c.creator_user_id
+             WHERE c.created_here = 1 ORDER BY u.name`,
+          )) as Row[]).map((row) => ({ id: String(row.id), name: String(row.name ?? "") }))
+        : [],
+    progress: { ...counts, etaMinutes },
     failedIds,
     publishedAt: showing?.published_at ? Number(showing.published_at) : null,
     publishedLabel: formatShanghaiTime(showing?.published_at ? Number(showing.published_at) : null),
@@ -363,6 +404,7 @@ export async function billingView(actor: SessionUser, unsyncedOnly: boolean) {
           : Number(row.used_quota) - Number(row.today_quota),
       cumulative: row.used_quota === null || row.used_quota === undefined ? null : Number(row.used_quota),
       typeName: channelTypeName(Number(row.type ?? 0)),
+      type: Number(row.type ?? 0),
       testQuota: Number(row.test_quota ?? 0),
       kind: String(row.kind),
       label: row.label ? String(row.label) : "",

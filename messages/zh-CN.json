@@ -41,7 +41,8 @@
     "billing": "总览",
     "recon": "对账",
     "users": "用户管理",
-    "settings": "设置"
+    "settings": "设置",
+    "bills": "账单"
   },
   "shell": {
     "cacheNote": "总览与渠道都读取本机缓存，不直接请求上游。",
@@ -462,7 +463,16 @@
     "missing": "网关上找不到",
     "anomaly": "异常",
     "backfill": "补同步于 {time}",
-    "rebindMarker": "已重新绑定 #{from}→#{to}"
+    "rebindMarker": "已重新绑定 #{from}→#{to}",
+    "byType": "按类型",
+    "sectionCount": "{count} 个渠道",
+    "collectingEta": "汇总中 {ok}/{total} · 预计 ~{minutes} 分钟 · 最晚 06:00 发布",
+    "billsTitle": "账单",
+    "billsScope": "每日账单按渠道类型分段，可选日期；管理员可按供应商筛选",
+    "pickDay": "账单日期",
+    "noBillDay": "{day} 还没有账单",
+    "allSuppliers": "全部供应商",
+    "supplierFilter": "供应商"
   },
   "recon": {
     "loading": "正在读取对账…",

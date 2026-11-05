@@ -112,6 +112,8 @@ Dockerfile                   多阶段构建，uid 1001
 
 日界是 Asia/Shanghai 的 00:00。`lib/jobs.ts` 每 **15 秒** 跑一次 `tick`，用 `lib/shanghai.ts` 的 `Intl` 时区 `Asia/Shanghai`，不读容器本地时区。容器是 UTC 也不影响日界。
 
+**基线拉取计划**（`lib/billing-plan.ts`）：每个 tick 不再无差别并发派发全部缺基线渠道，而是按计划出有限批次。每个渠道一次拉取最多 4 个上游请求（渠道 GET + 今日 `log/stat` + 两条测试日志 `log/stat`；今日日志为 0 时后两条跳过）。每网关有效配额 = `gateway_rpm − 4`（列表同步预留），每 tick 批次 ≈ 有效配额 ÷ 4 次调用 ÷ 4 tick/分（默认 60rpm → 约 4 个渠道/tick），避免队列任务超过 45 秒截止雪崩。排序：累计消耗大的渠道先拉，其次新渠道。连续失败的渠道指数退避（30s 起翻倍，封顶 15 分钟），不每 tick 重发烧配额。汇总中界面显示 `n/总 · 预计 ~x 分钟 · 最晚 06:00 发布`（ETA 按剩余渠道 × 4 ÷ 每网关有效配额估算）。
+
 `ensureBillingRun`：
 
 - 当天的 `baseline_day` 对应账单日是前一天。

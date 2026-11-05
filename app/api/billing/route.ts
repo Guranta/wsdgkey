@@ -6,6 +6,10 @@ export async function GET(req: Request) {
   const user = await currentUser();
   if (!user) return apiError("loginRequired", 401);
   const url = new URL(req.url);
-  const view = await billingView(user, url.searchParams.get("unsynced") === "1");
+  const view = await billingView(user, {
+    unsyncedOnly: url.searchParams.get("unsynced") === "1",
+    day: url.searchParams.get("day"),
+    supplierId: url.searchParams.get("supplier"),
+  });
   return Response.json(view, { headers: { "cache-control": "no-store" } });
 }

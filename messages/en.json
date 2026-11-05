@@ -41,7 +41,8 @@
     "billing": "Overview",
     "recon": "Reconciliation",
     "users": "Users",
-    "settings": "Settings"
+    "settings": "Settings",
+    "bills": "Bills"
   },
   "shell": {
     "cacheNote": "Overview and channels read the local cache; no direct upstream requests.",
@@ -462,7 +463,16 @@
     "missing": "Not found on the gateway",
     "anomaly": "Mismatch",
     "backfill": "Filled in at {time}",
-    "rebindMarker": "Rebound #{from}→#{to}"
+    "rebindMarker": "Rebound #{from}→#{to}",
+    "byType": "By type",
+    "sectionCount": "{count} channels",
+    "collectingEta": "Collecting {ok}/{total} · ETA ~{minutes} min · publishes by 06:00",
+    "billsTitle": "Bills",
+    "billsScope": "Daily bill by channel type; pick a date, admins can filter by supplier",
+    "pickDay": "Bill date",
+    "noBillDay": "No bill for {day} yet",
+    "allSuppliers": "All suppliers",
+    "supplierFilter": "Supplier"
   },
   "recon": {
     "loading": "Loading reconciliation…",

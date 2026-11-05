@@ -10,12 +10,13 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { Suspense, useState, type ReactNode } from "react";
 
-type NavItem = { href: string; labelKey: "channels" | "billing" | "recon" | "users" | "settings"; color: string; admin?: boolean };
+type NavItem = { href: string; labelKey: "channels" | "billing" | "bills" | "recon" | "users" | "settings"; color: string; admin?: boolean };
 
 const NAV: NavItem[] = [
   { href: "/billing", labelKey: "billing", color: "#FF9500" },
   { href: "/channels", labelKey: "channels", color: "#007AFF" },
-  { href: "/recon", labelKey: "recon", color: "#30B0C7" },
+  { href: "/bills", labelKey: "bills", color: "#30B0C7" },
+  { href: "/recon", labelKey: "recon", color: "#7C5CFC" },
   { href: "/admin/users", labelKey: "users", color: "#FF2D55", admin: true },
   { href: "/settings", labelKey: "settings", color: "#A2845E" },
 ];
