@@ -556,7 +556,8 @@ async function rememberChannel(gatewayId: string, item: UpstreamChannel, creator
         setting = ?, settings = ?, openai_organization = ?, response_time = COALESCE(?, response_time),
         auto_disable_reason = ?, auto_disable_history = ?, auto_disabled_at = ?,
         key_fingerprints = CASE WHEN ? = '' THEN key_fingerprints ELSE ? END,
-        upstream_missing = 0
+        upstream_missing = 0,
+        owned = CASE WHEN ? IS NULL THEN owned ELSE ? END
        WHERE id = ?`,
       [
         item.name, item.type, item.group || "default", item.status, item.baseUrl, item.models, item.modelMapping,
@@ -564,7 +565,8 @@ async function rememberChannel(gatewayId: string, item: UpstreamChannel, creator
         item.createdTime ? item.createdTime * 1000 : now, now, now, creatorId,
         item.priority, item.weight, item.tag, item.other, item.statusCodeMapping, item.paramOverride, item.headerOverride,
         item.setting, item.settings || "{}", item.openaiOrganization, item.responseTime,
-        history.reason, history.history, history.at, keyFingerprint, keyFingerprint, existing.id,
+        history.reason, history.history, history.at, keyFingerprint, keyFingerprint,
+        item.owned === true ? 1 : item.owned === false ? 0 : null, item.owned === true ? 1 : item.owned === false ? 0 : null, existing.id,
       ],
     );
     return String(existing.id);
@@ -576,14 +578,15 @@ async function rememberChannel(gatewayId: string, item: UpstreamChannel, creator
       test_model, remark, auto_ban, balance, used_quota, today_quota, upstream_created_at, created_at, updated_at,
       last_sync_at, sync_status, consecutive_failures, next_poll_at, demo_fail_left,
       priority, weight, tag, other, status_code_mapping, param_override, header_override, setting, settings,
-      openai_organization, response_time, auto_disable_reason, auto_disable_history, auto_disabled_at, key_fingerprints
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ok', 0, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      openai_organization, response_time, auto_disable_reason, auto_disable_history, auto_disabled_at, key_fingerprints, owned
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ok', 0, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       id, gatewayId, item.id, creatorId, item.name, item.type, item.group || "default", item.status, item.baseUrl, item.models,
       item.modelMapping, item.testModel, item.remark, item.autoBan ? 1 : 0, item.balance, item.usedQuota, item.todayFromPayload,
       item.createdTime ? item.createdTime * 1000 : now, now, now, now,
       item.priority, item.weight, item.tag, item.other, item.statusCodeMapping, item.paramOverride, item.headerOverride,
       item.setting, item.settings || "{}", item.openaiOrganization, item.responseTime, history.reason, history.history, history.at, keyFingerprint,
+      item.owned === true ? 1 : item.owned === false ? 0 : null,
     ],
   );
   return id;
@@ -619,6 +622,7 @@ export async function updateChannel(actor: SessionUser, id: string, body: Record
   form.key = String(body.key ?? "");
   const error = validateChannelForm(form, true);
   if (error) throw httpError(error, 400);
+  if (gateway.kind === "newapi_supplier" && Number(row.owned ?? 0) !== 1) throw httpError("supplierNotOwned", 403);
   const payload = transformFormDataToUpdatePayload(form, Number(row.upstream_id));
   try {
     await gatewayApi(gateway).update(payload);

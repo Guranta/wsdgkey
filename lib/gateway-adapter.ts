@@ -1,4 +1,4 @@
-import { dbGet, dbRun } from "./db";
+import { dbRun } from "./db";
 import type { GatewaySecret } from "./gateways";
 import { saveSellerCapabilities } from "./gateways";
 import { sellerChannelBody, readSellerCapabilities, type SellerCapabilities } from "./seller-payload";
@@ -183,10 +183,7 @@ function supplierApi(gateway: GatewaySecret): GatewayApi {
       return forbidden("create");
     },
     async update(payload) {
-      // 仅 owned=true 的本地渠道可改；字段裁剪由抽屉按 profile 的 editable_fields 做，这里兜底 owned
-      const channelId = String((payload as Record<string, unknown>)?.local_channel_id ?? "");
-      const row = channelId ? await dbGet("SELECT owned FROM channels WHERE id = ?", [channelId]) : null;
-      if (!row || Number(row.owned) !== 1) forbidden("update");
+      // owned 守卫在 channel-service 的 updateChannel（supplierNotOwned）；这里只负责 PUT
       await queued(gateway, "mutate", () => sellerCall(gateway, "/api/channel/", { method: "PUT", body: JSON.stringify(payload) }), 90_000);
     },
     async setStatus(): Promise<void> {
