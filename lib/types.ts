@@ -10,6 +10,7 @@ export type SessionUser = {
   locale: Locale | null;
   /** Top-bar site name. Defaults to the product brand. */
   siteName?: string;
+  renewalAlerts?: { id: string; name: string; checkedAt: number | null; expiresAt: number | null; detail: string }[];
 };
 
 export type ConnectionStatus = "unknown" | "ok" | "expiring" | "failing" | "expired";

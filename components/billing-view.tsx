@@ -29,6 +29,8 @@ type BillRow = {
   spanDays: number;
   backfillAt: number | null;
   gray: boolean;
+  billingMode?: string;
+  imported?: boolean;
   rebindFrom?: number | null;
   rebindTo?: number | null;
   oldSegmentStatus?: string;
@@ -45,6 +47,7 @@ type Bill = {
   unsyncedCount: number;
   totalConsumption: number;
   totalTestQuota: number;
+  showTestLine?: boolean;
   remainingBalance: number;
   usedUsd: number;
   byType: Slice[];
@@ -58,13 +61,14 @@ export type { Bill, BillRow };
 
 type BillingT = ReturnType<typeof useTranslations>;
 
-/** 行标签：span2/spanN 合计、未同步、无基线（账单页与总览共用）。 */
-export function billLabelText(t: BillingT, row: { label: string; kind?: string; spanDays: number }): string {
+/** 行标签：span2/spanN 合计、快照模式缺数据、未同步、无基线（账单页与总览共用）。 */
+export function billLabelText(t: BillingT, row: { label: string; kind?: string; spanDays: number; billingMode?: string }): string {
   const raw = row.label;
   if (raw === "span2" || raw === "两日合计") return t("span2");
   if (raw === "spanN") return t("spanN", { count: row.spanDays });
   const counted = raw.match(/^(\d+)日合计$/);
   if (counted) return t("spanN", { count: Number(counted[1]) });
+  if (row.billingMode === "snapshot" && row.kind !== "amount") return t("missingData");
   if (raw === "unsynced" || raw === "未同步" || row.kind === "unsynced") return t("unsynced");
   if (raw === "noBaseline" || raw === "无基线" || row.kind === "no-baseline") return t("noBaseline");
   if (raw === "oneDay" || raw === "一日" || !raw) return t("oneDay");

@@ -38,5 +38,10 @@ export async function fromError(error: unknown, fallback: string): Promise<Respo
       ? ((error as { values?: Values }).values ?? undefined)
       : undefined;
   const raw = error instanceof Error && error.message ? error.message : fallback;
-  return apiError(raw, status, values);
+  const field = typeof error === "object" && error && "field" in error && typeof (error as { field?: unknown }).field === "string" ? (error as { field: string }).field : "";
+  if (!field) return apiError(raw, status, values);
+  return Response.json(
+    { error: { message: await translateMessage(raw, values), field } },
+    { status, headers: { "cache-control": "no-store" } },
+  );
 }

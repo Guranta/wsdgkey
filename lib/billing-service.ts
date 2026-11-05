@@ -1,4 +1,4 @@
-import { deriveBaseline, reconcileFinding, resolveConsumption, todayExcludingTests, type BaselinePoint } from "./billing-math";
+import { deriveBaseline, NEAR_MIDNIGHT_MS, reconcileFinding, resolveConsumption, resolveSellerConsumption, todayExcludingTests, type BaselinePoint } from "./billing-math";
 import { CALLS_PER_CHANNEL, LIST_SYNC_RESERVE_PER_MIN, type PlanChannel } from "./billing-plan";
 import { channelTypeName } from "./channel-types";
 import { QUOTA_PER_DOLLAR } from "./format";
@@ -9,6 +9,7 @@ import { rebindMarkers } from "./rebind";
 import { rateLimits } from "./settings";
 import { addDays, formatShanghaiTime, logWindow, shanghaiClock, shanghaiMidnight } from "./shanghai";
 import type { SessionUser } from "./types";
+import { gatewayApi } from "./gateway-adapter";
 import { fetchUpstreamChannel, testLogQuota, todayQuota, UpstreamFailure } from "./upstream";
 
 type Row = Record<string, unknown>;
@@ -35,6 +36,88 @@ export async function snapshotCreateBaseline(channelId: string, usedQuota: numbe
   await dbRun("UPDATE channels SET create_baseline = COALESCE(create_baseline, ?) WHERE id = ?", [quota, channelId]);
 }
 
+async function pullSellerBaseline(
+  channelId: string,
+  baselineDay: string,
+  gateway: NonNullable<Awaited<ReturnType<typeof getGateway>>>,
+  row: Row,
+  upstreamId: number,
+): Promise<"ok" | "failed"> {
+  const origin = String(row.origin ?? "created");
+  const importedAt = row.imported_at ? Number(row.imported_at) : 0;
+  const dayStart = shanghaiMidnight(baselineDay);
+  if (origin === "imported" && importedAt >= dayStart) {
+    await markAttempt(baselineDay, channelId, "ok", null);
+    return "ok";
+  }
+  try {
+    const api = gatewayApi(gateway);
+    let remote: { usedQuota: number; balance: number | null } | null = null;
+    let total = 0;
+    for (let page = 1; page <= 50; page += 1) {
+      const listed = await api.list(page);
+      total = listed.total;
+      const found = listed.items.find((item) => item.id === upstreamId);
+      if (found) {
+        remote = found;
+        break;
+      }
+      if (page * 20 >= total) break;
+    }
+    if (!remote) {
+      await markMissing(channelId);
+      throw new UpstreamFailure("missing", false);
+    }
+    const pulledAt = Date.now();
+    if (pulledAt < dayStart || pulledAt - dayStart > NEAR_MIDNIGHT_MS) throw new UpstreamFailure("missingToday", false);
+    const existing = await dbGet("SELECT source FROM channel_baselines WHERE channel_id = ? AND day = ?", [channelId, baselineDay]);
+    if (existing?.source === "create" || existing?.source === "import-anchor" || existing?.source === "snapshot") {
+      await markAttempt(baselineDay, channelId, "ok", null);
+      const run = await dbGet("SELECT status, bill_day FROM billing_runs WHERE baseline_day = ?", [baselineDay]);
+      if (run?.status === "published") await writeRow(channelId, String(run.bill_day), Date.now());
+      return "ok";
+    }
+    const prior = await dbGet("SELECT COUNT(*) AS n FROM channel_baselines WHERE channel_id = ?", [channelId]);
+    const source = origin === "imported" && Number(prior?.n ?? 0) === 0 ? "import-anchor" : "snapshot";
+    await dbRun(
+      `INSERT INTO channel_baselines (channel_id, day, baseline, cumulative, today_quota, source, pulled_at)
+       VALUES (?, ?, ?, ?, NULL, ?, ?)
+       ON CONFLICT(channel_id, day) DO NOTHING`,
+      [channelId, baselineDay, remote.usedQuota, remote.usedQuota, source, pulledAt],
+    );
+    await dbRun(
+      "UPDATE channels SET used_quota = ?, balance = COALESCE(?, balance), last_sync_at = ?, sync_status = 'ok', sync_error = NULL, consecutive_failures = 0, upstream_missing = 0 WHERE id = ?",
+      [remote.usedQuota, remote.balance, pulledAt, channelId],
+    );
+    await markAttempt(baselineDay, channelId, "ok", null);
+    const run = await dbGet("SELECT status, bill_day FROM billing_runs WHERE baseline_day = ?", [baselineDay]);
+    if (run?.status === "published") await writeRow(channelId, String(run.bill_day), Date.now());
+    return "ok";
+  } catch (error) {
+    return failBaseline(baselineDay, channelId, error);
+  }
+}
+
+async function failBaseline(baselineDay: string, channelId: string, error: unknown): Promise<"failed"> {
+  const message = error instanceof Error ? error.message : "pullFailed";
+  const missing = /找不到|不存在|not found|^missing$/i.test(message);
+  if (missing) await markMissing(channelId);
+  await dbRun(
+    `INSERT INTO billing_attempts (baseline_day, channel_id, status, error, updated_at) VALUES (?, ?, 'failed', ?, ?)
+     ON CONFLICT(baseline_day, channel_id) DO UPDATE SET status = 'failed', error = excluded.error, updated_at = excluded.updated_at`,
+    [baselineDay, channelId, message.slice(0, 200), Date.now()],
+  );
+  if (!missing) {
+    await dbRun("UPDATE channels SET sync_status = ?, sync_error = ?, last_sync_at = ?, consecutive_failures = consecutive_failures + 1 WHERE id = ?", [
+      /繁忙|限流|超时/.test(message) ? "rate_limited" : "failed",
+      message.slice(0, 200),
+      Date.now(),
+      channelId,
+    ]);
+  }
+  return "failed";
+}
+
 export async function pullChannelBaseline(channelId: string, baselineDay: string): Promise<"ok" | "failed"> {
   const row = (await dbGet("SELECT * FROM channels WHERE id = ?", [channelId])) as Row | undefined;
   if (!row) return "failed";
@@ -42,6 +125,7 @@ export async function pullChannelBaseline(channelId: string, baselineDay: string
   if (!gateway) return "failed";
   if (Number(row.created_here) !== 1) return "failed";
   const upstreamId = Number(row.upstream_id);
+  if (gateway.kind === "newapi_seller") return pullSellerBaseline(channelId, baselineDay, gateway, row, upstreamId);
   try {
     const remote = await fetchUpstreamChannel(gateway, upstreamId);
     if (!remote) {
@@ -162,20 +246,47 @@ async function spanTestQuota(channelId: string, startDay: string, endDay: string
 }
 
 async function writeRow(channelId: string, billDay: string, backfillAt: number | null): Promise<void> {
-  const channel = await dbGet("SELECT created_here, upstream_missing FROM channels WHERE id = ?", [channelId]);
+  const channel = await dbGet("SELECT created_here, upstream_missing, gateway_id FROM channels WHERE id = ?", [channelId]);
   if (!channel || Number(channel.created_here) !== 1) {
     await dbRun("DELETE FROM billing_rows WHERE bill_day = ? AND channel_id = ?", [billDay, channelId]);
     await syncReconChannel(billDay, channelId);
     return;
   }
-  const resolved = resolveConsumption(billDay, await baselinesFor(channelId));
+  const gateway = await getGateway(String(channel.gateway_id ?? ""));
+  const seller = gateway?.kind === "newapi_seller";
+  const resolved = seller ? resolveSellerConsumption(billDay, await baselinesFor(channelId)) : resolveConsumption(billDay, await baselinesFor(channelId));
   const id = `${billDay}:${channelId}`;
   if (resolved.kind === "skip") {
     await dbRun("DELETE FROM billing_rows WHERE bill_day = ? AND channel_id = ?", [billDay, channelId]);
-    await syncReconChannel(billDay, channelId);
+    if (seller) await dbRun("DELETE FROM recon_rows WHERE bill_day = ? AND channel_id = ? AND supplier_action = '' AND admin_resolution = ''", [billDay, channelId]);
+    else await syncReconChannel(billDay, channelId);
     return;
   }
   const missing = Number(channel.upstream_missing) === 1;
+  if (seller) {
+    const finding = missing ? "missing" : "";
+    if (resolved.kind === "amount") {
+      await dbRun(
+        `INSERT INTO billing_rows (id, bill_day, channel_id, start_day, end_day, span_days, label, consumption, kind, backfill_at, test_quota, finding, log_quota, billing_mode)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'amount', ?, 0, ?, NULL, 'snapshot')
+         ON CONFLICT(bill_day, channel_id) DO UPDATE SET
+           start_day = excluded.start_day, end_day = excluded.end_day, span_days = excluded.span_days,
+           label = excluded.label, consumption = excluded.consumption, kind = 'amount',
+           backfill_at = COALESCE(billing_rows.backfill_at, excluded.backfill_at),
+           test_quota = 0, finding = excluded.finding, log_quota = NULL, billing_mode = 'snapshot'`,
+        [id, billDay, channelId, resolved.startDay, resolved.endDay, resolved.days, resolved.label, resolved.consumption, backfillAt, finding],
+      );
+    } else {
+      await dbRun(
+        `INSERT INTO billing_rows (id, bill_day, channel_id, start_day, end_day, span_days, label, consumption, kind, backfill_at, test_quota, finding, log_quota, billing_mode)
+         VALUES (?, ?, ?, ?, ?, 1, NULL, NULL, ?, ?, 0, ?, NULL, 'snapshot')
+         ON CONFLICT(bill_day, channel_id) DO UPDATE SET kind = excluded.kind, consumption = NULL, test_quota = 0, finding = excluded.finding, log_quota = NULL, billing_mode = 'snapshot', backfill_at = COALESCE(billing_rows.backfill_at, excluded.backfill_at)`,
+        [id, billDay, channelId, billDay, billDay, resolved.kind, backfillAt, finding],
+      );
+    }
+    await dbRun("DELETE FROM recon_rows WHERE bill_day = ? AND channel_id = ? AND supplier_action = '' AND admin_resolution = ''", [billDay, channelId]);
+    return;
+  }
   if (resolved.kind === "amount") {
     const testQuota = await spanTestQuota(channelId, resolved.startDay, resolved.endDay);
     const logQuota = await logQuotaForSpan(channelId, resolved.startDay, resolved.endDay);
@@ -263,7 +374,8 @@ export async function ensureBillingRun(now = new Date()): Promise<{ baselineDay:
   return { baselineDay, billDay, status: String(latest?.status ?? "collecting") };
 }
 
-/** 缺基线渠道及其计划字段：大额消耗优先，带上连续失败计数和最近失败时间供退避。 */
+/** 缺基线渠道及其计划字段：大额消耗优先，带上连续失败计数和最近失败时间供退避。
+ *  当天导入的渠道（imported_at >= 基线日 0 点）从首个快照起算，不进当日基线拉取。 */
 export async function missingBaselineChannels(baselineDay: string): Promise<PlanChannel[]> {
   const rows = (await dbAll(
     `SELECT c.id, c.gateway_id, c.used_quota, c.created_at, c.consecutive_failures, a.updated_at AS last_failed_at
@@ -271,8 +383,9 @@ export async function missingBaselineChannels(baselineDay: string): Promise<Plan
      LEFT JOIN channel_baselines b ON b.channel_id = c.id AND b.day = ?
      LEFT JOIN billing_attempts a ON a.channel_id = c.id AND a.baseline_day = ? AND a.status = 'failed'
      WHERE c.created_here = 1 AND b.channel_id IS NULL
+       AND NOT (COALESCE(c.origin, 'created') = 'imported' AND c.imported_at IS NOT NULL AND c.imported_at >= ?)
      ORDER BY c.used_quota DESC, c.created_at DESC`,
-    [baselineDay, baselineDay],
+    [baselineDay, baselineDay, shanghaiMidnight(baselineDay)],
   )) as Row[];
   return rows.map((row) => ({
     id: String(row.id),
@@ -306,7 +419,7 @@ export async function billingView(actor: SessionUser, options: BillingViewOption
   const scope = scopeSupplier;
   const rows = billDay
     ? ((await dbAll(
-        `SELECT r.*, c.name, c.group_name, c.balance, c.used_quota, c.today_quota, c.type, u.name AS creator_name
+        `SELECT r.*, c.name, c.group_name, c.balance, c.used_quota, c.today_quota, c.type, c.origin, u.name AS creator_name
          FROM billing_rows r
          JOIN channels c ON c.id = r.channel_id
          LEFT JOIN users u ON u.id = c.creator_user_id
@@ -371,6 +484,7 @@ export async function billingView(actor: SessionUser, options: BillingViewOption
     unsyncedCount: unsynced.length,
     totalConsumption: counted.reduce((sum, row) => sum + Number(row.consumption ?? 0), 0),
     totalTestQuota: rows.reduce((sum, row) => sum + Number(row.test_quota ?? 0), 0),
+    showTestLine: rows.some((row) => String(row.billing_mode ?? "") !== "snapshot"),
     remainingBalance: rows.reduce((sum, row) => sum + (row.balance === null || row.balance === undefined ? 0 : Number(row.balance)), 0),
     usedUsd: rows.reduce((sum, row) => sum + Number(row.used_quota ?? 0), 0) / QUOTA_PER_DOLLAR,
     byType: (() => {
@@ -397,7 +511,16 @@ export async function billingView(actor: SessionUser, options: BillingViewOption
       group: String(row.group_name ?? ""),
       supplier: String(row.creator_name ?? "") || "unknown",
       consumption: row.consumption === null || row.consumption === undefined ? null : Number(row.consumption),
-      today: row.today_quota === null || row.today_quota === undefined ? null : Number(row.today_quota),
+      today:
+        String(row.billing_mode ?? "") === "snapshot"
+          ? row.consumption === null || row.consumption === undefined
+            ? null
+            : Number(row.consumption)
+          : row.today_quota === null || row.today_quota === undefined
+            ? null
+            : Number(row.today_quota),
+      billingMode: String(row.billing_mode ?? ""),
+      imported: String(row.origin ?? "") === "imported",
       before:
         row.used_quota === null || row.used_quota === undefined || row.today_quota === null || row.today_quota === undefined
           ? null
@@ -487,4 +610,43 @@ export async function reconView(actor: SessionUser) {
     unsynced: mapped.filter((row) => row.kind !== "amount").length,
     rows: mapped,
   };
+}
+
+export type SnapshotCell = { kind: "amount"; quota: number } | { kind: "missing" } | { kind: "before" };
+
+/** Last 7 Shanghai days of snapshot deltas for one seller gateway. Not a reconciliation. */
+export async function sellerSnapshotGrid(actor: SessionUser, gatewayId: string) {
+  const gateway = await getGateway(gatewayId);
+  if (!gateway || gateway.kind !== "newapi_seller") return null;
+  if (actor.role !== "admin" && gateway.ownerUserId !== actor.id) return null;
+  const today = shanghaiClock().day;
+  const days = Array.from({ length: 7 }, (_, index) => addDays(today, index - 7));
+  const scope = actor.role === "admin" ? "" : "AND creator_user_id = ?";
+  const params = actor.role === "admin" ? [gatewayId] : [gatewayId, actor.id];
+  const channels = (await dbAll(
+    `SELECT id, name, upstream_id, origin FROM channels WHERE gateway_id = ? AND created_here = 1 ${scope} ORDER BY upstream_id`,
+    params,
+  )) as Row[];
+  const rows = [];
+  for (const channel of channels) {
+    const baselines = await baselinesFor(String(channel.id));
+    const first = baselines.map((item) => item.day).sort()[0];
+    const cells: SnapshotCell[] = days.map((day) => {
+      if (!first || day < first) return { kind: "before" };
+      const resolved = resolveSellerConsumption(day, baselines);
+      if (resolved.kind === "amount") return { kind: "amount", quota: resolved.consumption };
+      if (resolved.kind === "skip") return { kind: "before" };
+      return { kind: "missing" };
+    });
+    const amounts = cells.flatMap((cell) => (cell.kind === "amount" ? [cell.quota] : []));
+    rows.push({
+      id: String(channel.id),
+      name: String(channel.name ?? ""),
+      upstreamId: Number(channel.upstream_id),
+      imported: String(channel.origin ?? "") === "imported",
+      cells,
+      total: amounts.length ? amounts.reduce((sum, value) => sum + value, 0) : null,
+    });
+  }
+  return { gatewayId: gateway.id, gatewayName: gateway.name, days, rows };
 }

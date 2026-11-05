@@ -108,6 +108,17 @@ async function zeroStreak(channelId: string, billDay: string): Promise<number> {
 export async function syncReconChannel(billDay: string, channelId: string): Promise<void> {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(billDay)) return;
   if (await periodLocked(billDay.slice(0, 7))) return;
+  const channelKind = await dbGet(
+    "SELECT g.kind FROM channels c JOIN gateways g ON g.id = c.gateway_id WHERE c.id = ?",
+    [channelId],
+  );
+  if (channelKind?.kind === "newapi_seller") {
+    await dbRun(
+      "DELETE FROM recon_rows WHERE bill_day = ? AND channel_id = ? AND supplier_action = '' AND admin_resolution = ''",
+      [billDay, channelId],
+    );
+    return;
+  }
   const bill = await dbGet("SELECT * FROM billing_rows WHERE bill_day = ? AND channel_id = ?", [billDay, channelId]);
   if (!bill) {
     await dbRun(
@@ -272,15 +283,17 @@ export async function reconPage(actor: SessionUser, month: string | null) {
     const pending = await dbGet(
       `SELECT r.channel_id FROM billing_rows r
        JOIN channels c ON c.id = r.channel_id
+       JOIN gateways g ON g.id = c.gateway_id
        LEFT JOIN recon_rows q ON q.bill_day = r.bill_day AND q.channel_id = r.channel_id
-       WHERE r.bill_day = ? AND c.created_here = 1 AND q.id IS NULL LIMIT 1`,
+       WHERE r.bill_day = ? AND c.created_here = 1 AND COALESCE(g.kind, 'newapi_admin') <> 'newapi_seller' AND q.id IS NULL LIMIT 1`,
       [day],
     );
     if (!pending) continue;
     const channels = (await dbAll(
       `SELECT r.channel_id FROM billing_rows r JOIN channels c ON c.id = r.channel_id
+       JOIN gateways g ON g.id = c.gateway_id
        LEFT JOIN recon_rows q ON q.bill_day = r.bill_day AND q.channel_id = r.channel_id
-       WHERE r.bill_day = ? AND c.created_here = 1 AND q.id IS NULL`,
+       WHERE r.bill_day = ? AND c.created_here = 1 AND COALESCE(g.kind, 'newapi_admin') <> 'newapi_seller' AND q.id IS NULL`,
       [day],
     )) as { channel_id: string }[];
     for (const channel of channels) await syncReconChannel(day, channel.channel_id);
@@ -294,7 +307,7 @@ export async function reconPage(actor: SessionUser, month: string | null) {
          JOIN channels c ON c.id = q.channel_id
          JOIN gateways g ON g.id = q.gateway_id
          LEFT JOIN users u ON u.id = c.creator_user_id
-         WHERE q.bill_day LIKE ? AND c.created_here = 1 ${scope}
+         WHERE q.bill_day LIKE ? AND c.created_here = 1 AND COALESCE(g.kind, 'newapi_admin') <> 'newapi_seller' ${scope}
          ORDER BY g.name, c.group_name, c.upstream_id, q.bill_day`,
         [`${selected}%`, ...params.slice(1)],
       )) as Row[])

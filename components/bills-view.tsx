@@ -154,13 +154,17 @@ export function BillsView() {
                     {rows.map((row) => (
                       <tr key={row.id} className={`border-t border-line ${row.gray ? "text-muted" : ""}`}>
                         <td className="px-4 py-3">
-                          <div className="font-medium">{row.name}</div>
+                          <div className="font-medium">
+                            {row.name}
+                            {row.billingMode === "snapshot" ? <span className="ml-1.5 whitespace-nowrap rounded-full px-2 py-0.5 text-[11px] font-medium" style={{ background: "rgba(48,176,199,0.15)", color: "#0E7490" }} title={t("snapshotTip")}>{t("snapshotTag")}</span> : null}
+                            {row.imported ? <span className="ml-1.5 whitespace-nowrap rounded-full bg-input px-2 py-0.5 text-[11px] font-normal text-muted">{t("importedTag")}</span> : null}
+                          </div>
                           <div className="text-xs text-muted">
                             {[row.group || "—", admin && row.supplier !== "unknown" ? row.supplier : ""].filter(Boolean).join(" · ")}
                           </div>
-                          <div className="text-[11px] text-muted">{[row.rebindFrom && row.rebindTo ? t("rebindMarker", { from: row.rebindFrom, to: row.rebindTo }) : "", row.oldSegmentStatus === "unsynced" ? t("unsynced") : "", billFindingText(t, row.finding), billLabelText(t, row), row.backfillAt ? t("backfill", { time: formatShanghaiTime(row.backfillAt, locale) }) : ""].filter(Boolean).join(" · ")}</div>
+                          <div className="text-[11px] text-muted">{[row.rebindFrom && row.rebindTo ? t("rebindMarker", { from: row.rebindFrom, to: row.rebindTo }) : "", row.oldSegmentStatus === "unsynced" ? t("unsynced") : "", row.billingMode === "snapshot" && row.kind !== "amount" ? t("missingData") : "", billFindingText(t, row.finding), billLabelText(t, row), row.backfillAt ? t("backfill", { time: formatShanghaiTime(row.backfillAt, locale) }) : ""].filter(Boolean).join(" · ")}</div>
                         </td>
-                        <td className="whitespace-nowrap px-4 py-3 tabular-nums">{cell(row.today)}</td>
+                        <td className="whitespace-nowrap px-4 py-3 tabular-nums">{row.billingMode === "snapshot" && row.kind !== "amount" ? t("missingData") : cell(row.today)}</td>
                         <td className="whitespace-nowrap px-4 py-3 tabular-nums">{cell(row.before)}</td>
                         <td className="whitespace-nowrap px-4 py-3 tabular-nums">{cell(row.cumulative)}</td>
                       </tr>

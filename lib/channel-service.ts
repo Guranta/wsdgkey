@@ -10,7 +10,9 @@ import {
   type ChannelFormValues,
 } from "./channel-payload";
 import { dbAll, dbGet, dbRun } from "./db";
-import { getGateway } from "./gateways";
+import { gatewayApi } from "./gateway-adapter";
+import { getGateway, type GatewaySecret } from "./gateways";
+import { atChannelCap, isBaseUrlDenial, sellerCreateBodies } from "./seller-payload";
 import { snapshotCreateBaseline } from "./billing-service";
 import { ensureBinding } from "./rebind";
 import { upstreamQueue } from "./rate-queue";
@@ -21,12 +23,9 @@ import { cheapestModel } from "./test-model";
 import type { SessionUser } from "./types";
 import {
   addUpstreamChannel,
-  fetchUpstreamChannel,
   listUpstreamChannels,
-  setUpstreamStatus,
   testLogQuota,
   refreshCodexCredential,
-  testUpstreamChannel,
   updateUpstreamChannel,
   type UpstreamChannel,
 } from "./upstream";
@@ -82,6 +81,7 @@ export type ChannelView = {
   autoDisabledAt: number | null;
   createdHere: boolean;
   upstreamMissing: boolean;
+  origin: "created" | "imported";
 };
 
 function successRateOf(row: ChannelRow): number | null {
@@ -158,11 +158,12 @@ function view(row: ChannelRow, baseline: number | null): ChannelView {
     autoDisabledAt: row.auto_disabled_at ? Number(row.auto_disabled_at) : timeFromHistory(history),
     createdHere: Number(row.created_here) === 1,
     upstreamMissing: Number(row.upstream_missing) === 1,
+    origin: String(row.origin ?? "created") === "imported" ? "imported" : "created",
   };
 }
 
-function httpError(message: string, status: number, values?: Record<string, string | number>): Error {
-  return Object.assign(new Error(message), { status, values });
+function httpError(message: string, status: number, values?: Record<string, string | number>, field?: string): Error {
+  return Object.assign(new Error(message), { status, values, field });
 }
 
 function canSee(actor: SessionUser, creatorId: string | null): boolean {
@@ -421,9 +422,68 @@ function formFromRow(row: ChannelRow): Partial<ChannelFormValues> {
   });
 }
 
+async function createSellerChannels(actor: SessionUser, gateway: GatewaySecret, body: Record<string, unknown>) {
+  if (!gateway.canWrite) throw httpError("sellerCannotWrite", 400);
+  const form = formFromInput(body);
+  const keys = splitKeys(form.key);
+  if (keys.length > 1) form.multi_key_mode = "single";
+  const error = validateChannelForm(form, false);
+  if (error) throw httpError(error, 400);
+  const api = gatewayApi(gateway);
+  const caps = (await api.list(1)).capabilities;
+  if (atChannelCap(caps, keys.length)) throw httpError("atSiteLimit", 400);
+  const owner = gateway.ownerUserId || actor.id;
+  const before = new Set(
+    ((await dbAll("SELECT upstream_id FROM channels WHERE gateway_id = ?", [gateway.id])) as { upstream_id: number }[]).map((item) => Number(item.upstream_id)),
+  );
+  const failures: { name: string; reason: string }[] = [];
+  const createdIds: string[] = [];
+  let created = 0;
+  const bodies = sellerCreateBodies(transformFormDataToCreatePayload({ ...form, key: keys.join("\n"), multi_key_mode: "single" }));
+  for (const payload of bodies) {
+    try {
+      await api.create(payload);
+      created += 1;
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : "createFailed";
+      failures.push({ name: form.name, reason: message });
+      await audit(actor, null, null, "create", "fail", message);
+      if (keys.length === 1 && isBaseUrlDenial(message)) throw httpError(message, 400, undefined, "base_url");
+    }
+  }
+  if (created === 0) {
+    const detail = failures.map((item) => item.reason).filter(Boolean).join("；");
+    throw httpError(detail || "createFailed", 400, undefined, failures.some((item) => isBaseUrlDenial(item.reason)) ? "base_url" : undefined);
+  }
+  let claimed = 0;
+  for (let page = 1; page <= 20; page += 1) {
+    const listed = await api.list(page);
+    for (const item of listed.items) {
+      if (before.has(item.id) || item.name !== form.name) continue;
+      const id = await rememberChannel(gateway.id, item, owner, "");
+      if (id) {
+        const quota = Number.isFinite(item.usedQuota) ? item.usedQuota : 0;
+        await dbRun("UPDATE channels SET created_here = 1, creator_user_id = ?, create_baseline = ?, origin = 'created' WHERE id = ?", [owner, quota, id]);
+        await snapshotCreateBaseline(id, quota);
+        await ensureBinding(id, gateway.id, item.id, quota);
+        createdIds.push(id);
+      }
+      claimed += 1;
+      before.add(item.id);
+    }
+    if (claimed >= created || page * 20 >= listed.total) break;
+  }
+  await audit(actor, createdIds[0] ?? null, null, "create", "ok", `created ${created}`);
+  const tests = [];
+  for (const id of createdIds) tests.push(await testChannel(actor, id, "", { ignoreCooldown: true, origin: "auto-save" }));
+  return { created, failed: failures.length, failureReasons: failures, ids: createdIds, duplicateKeys: 0, tests };
+}
+
 export async function createChannels(actor: SessionUser, body: Record<string, unknown>) {
   const gateway = await getGateway(String(body.gatewayId ?? ""));
   if (!gateway) throw httpError("gatewayRequired", 400);
+  if (actor.role !== "admin" && gateway.kind === "newapi_seller" && gateway.ownerUserId !== actor.id) throw httpError("gatewayMissing", 404);
+  if (gateway.kind === "newapi_seller") return createSellerChannels(actor, gateway, body);
   const form = formFromInput(body);
   const keys = splitKeys(form.key);
   if (keys.length > 1 && (!form.multi_key_mode || form.multi_key_mode === "single")) form.multi_key_mode = "batch";
@@ -561,12 +621,14 @@ export async function updateChannel(actor: SessionUser, id: string, body: Record
   if (error) throw httpError(error, 400);
   const payload = transformFormDataToUpdatePayload(form, Number(row.upstream_id));
   try {
-    await updateUpstreamChannel(gateway, payload);
+    await gatewayApi(gateway).update(payload);
   } catch (cause) {
-    await audit(actor, id, Number(row.upstream_id), "update", "fail", cause instanceof Error ? cause.message : "saveFailed");
+    const message = cause instanceof Error ? cause.message : "saveFailed";
+    await audit(actor, id, Number(row.upstream_id), "update", "fail", message);
+    if (gateway.kind === "newapi_seller" && isBaseUrlDenial(message)) throw httpError(message, 400, undefined, "base_url");
     throw cause;
   }
-  const fresh = await fetchUpstreamChannel(gateway, Number(row.upstream_id));
+  const fresh = await gatewayApi(gateway).get(Number(row.upstream_id));
   if (fresh) await rememberChannel(gateway.id, fresh, row.creator_user_id ? String(row.creator_user_id) : null, form.key.trim() ? splitKeys(form.key).map(fingerprint).join(",") : "");
   await audit(actor, id, Number(row.upstream_id), "update", "ok", form.name);
   return { ok: true };
@@ -576,6 +638,7 @@ export async function setAutoBan(actor: SessionUser, id: string, enabled: boolea
   const row = await ownedRow(actor, id);
   const gateway = await getGateway(String(row.gateway_id));
   if (!gateway) throw httpError("gatewayMissing", 404);
+  if (gateway.kind === "newapi_seller") throw httpError("sellerCannotWrite", 400);
   const form = hydrateStoredForm(row);
   form.auto_ban = enabled ? 1 : 0;
   form.key = "";
@@ -654,8 +717,14 @@ export async function changeStatus(actor: SessionUser, ids: string[], enabled: b
       await audit(actor, id, Number(row.upstream_id), enabled ? "enable" : "disable", "fail", lastError);
       continue;
     }
+    if (gateway.kind === "newapi_seller" && !gateway.canToggle) {
+      fail += 1;
+      lastError = "sellerCannotToggle";
+      failedItems.push({ id, name: String(row.name ?? id), reason: lastError });
+      continue;
+    }
     try {
-      await setUpstreamStatus(gateway, Number(row.upstream_id), status);
+      await gatewayApi(gateway).setStatus(Number(row.upstream_id), status);
     } catch (cause) {
       fail += 1;
       lastError = cause instanceof Error ? cause.message : "statusFailed";
@@ -672,7 +741,7 @@ export async function changeStatus(actor: SessionUser, ids: string[], enabled: b
     if (!enabled) continue;
     const result = await testChannel(actor, id, "", { ignoreCooldown: true, origin: "auto-enable" });
     tests.push(result);
-    const fresh = await fetchUpstreamChannel(gateway, Number(row.upstream_id));
+    const fresh = await gatewayApi(gateway).get(Number(row.upstream_id));
     if (fresh) await rememberChannel(gateway.id, fresh, row.creator_user_id ? String(row.creator_user_id) : null);
     const after = await dbGet("SELECT status, auto_disable_reason, name FROM channels WHERE id = ?", [id]);
     if (Number(after?.status) === 3) redisabledItems.push({ id, name: String(after?.name ?? row.name), reason: String(after?.auto_disable_reason ?? "") });
@@ -709,7 +778,7 @@ export async function testChannel(
   const started = Date.now();
   let outcome: TestOutcome;
   try {
-    const result = await testUpstreamChannel(gateway, Number(row.upstream_id), chosen);
+    const result = await gatewayApi(gateway).test(Number(row.upstream_id), chosen);
     const latencyMs = result.timeSeconds > 0 ? Math.round(result.timeSeconds * 1000) : Date.now() - started;
     outcome = {
       id,
@@ -723,7 +792,7 @@ export async function testChannel(
     outcome = { id, name: String(row.name), ok: false, model: chosen, latencyMs: Date.now() - started, message: cause instanceof Error ? cause.message : "testFailed" };
   }
   let quota: number | null = null;
-  if (outcome.ok) {
+  if (outcome.ok && gateway.kind !== "newapi_seller") {
     try {
       quota = await testLogQuota(gateway, Number(row.upstream_id), started - 5_000, Date.now() + 5_000);
     } catch {
@@ -750,6 +819,7 @@ export async function refreshCodex(actor: SessionUser, id: string): Promise<{ me
   if (Number(row.type) !== 57) throw httpError("codexOnly", 400);
   const gateway = await getGateway(String(row.gateway_id));
   if (!gateway) throw httpError("gatewayMissing", 404);
+  if (gateway.kind === "newapi_seller") throw httpError("sellerCannotWrite", 400);
   try {
     const refreshed = await refreshCodexCredential(gateway, Number(row.upstream_id));
     await audit(actor, id, Number(row.upstream_id), "codex-refresh", "ok", refreshed.accountId || refreshed.message);
@@ -771,7 +841,7 @@ export async function syncGatewayPage(gatewayId: string, page: number): Promise<
   if (!gateway) return { done: true };
   try {
     if (page <= 1) await dbRun("DELETE FROM gateway_list_seen WHERE gateway_id = ?", [gatewayId]);
-    const listed = await listUpstreamChannels(gateway, page);
+    const listed = await gatewayApi(gateway).list(page);
     for (const item of listed.items) {
       await rememberChannel(gateway.id, item, null);
       await dbRun(
@@ -810,6 +880,55 @@ async function finishGatewayList(gatewayId: string): Promise<void> {
   );
   await dbRun("DELETE FROM channels WHERE gateway_id = ? AND created_here = 0", [gatewayId]);
   await dbRun("DELETE FROM gateway_list_seen WHERE gateway_id = ?", [gatewayId]);
+}
+
+export async function importSellerChannels(actor: SessionUser, gatewayId: string) {
+  const gateway = await getGateway(gatewayId);
+  if (!gateway || gateway.kind !== "newapi_seller") throw httpError("gatewayMissing", 404);
+  if (actor.role !== "admin" && gateway.ownerUserId !== actor.id) throw httpError("gatewayMissing", 404);
+  const owner = gateway.ownerUserId || actor.id;
+  const api = gatewayApi(gateway);
+  let imported = 0;
+  let skipped = 0;
+  let failed = 0;
+  let keptAutoDisabled = 0;
+  const failures: { id: number; name: string; reason: string }[] = [];
+  let total = 0;
+  for (let page = 1; page <= 50; page += 1) {
+    const listed = await api.list(page);
+    total = listed.total;
+    for (const item of listed.items) {
+      const existing = await dbGet("SELECT id, created_here FROM channels WHERE gateway_id = ? AND upstream_id = ?", [gateway.id, item.id]);
+      if (existing && Number(existing.created_here) === 1) {
+        skipped += 1;
+        continue;
+      }
+      try {
+        const id = await rememberChannel(gateway.id, item, owner);
+        if (!id) throw new Error("importFailed");
+        await dbRun(
+          "UPDATE channels SET created_here = 1, creator_user_id = ?, origin = 'imported', imported_at = COALESCE(imported_at, ?), create_baseline = NULL WHERE id = ?",
+          [owner, Date.now(), id],
+        );
+        await ensureBinding(id, gateway.id, item.id, Number.isFinite(item.usedQuota) ? item.usedQuota : 0);
+        if (item.status === 3) keptAutoDisabled += 1;
+        imported += 1;
+      } catch (cause) {
+        failed += 1;
+        failures.push({ id: item.id, name: item.name, reason: cause instanceof Error ? cause.message : "importFailed" });
+      }
+    }
+    if (page * 20 >= total) break;
+  }
+  return { imported, skipped, failed, failures, keptAutoDisabled };
+}
+
+export async function readSellerCap(actor: SessionUser, gatewayId: string) {
+  const gateway = await getGateway(gatewayId);
+  if (!gateway || gateway.kind !== "newapi_seller") throw httpError("gatewayMissing", 404);
+  if (actor.role !== "admin" && gateway.ownerUserId !== actor.id) throw httpError("gatewayMissing", 404);
+  const listed = await gatewayApi(gateway).list(1);
+  return listed.capabilities ?? { canWrite: gateway.canWrite, canToggle: gateway.canToggle, canEditRouting: gateway.canEditRouting, maxChannels: gateway.maxChannels, total: gateway.siteChannelTotal };
 }
 
 export async function gatewayIds(): Promise<string[]> {

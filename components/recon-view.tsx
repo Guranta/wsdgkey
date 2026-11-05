@@ -2,6 +2,7 @@
 
 import { useConnections } from "@/components/providers";
 import { Alert, buttonClass, Card, fieldClass, PageHeader, useIsClient } from "@/components/ui";
+import { formatUsd } from "@/lib/format";
 import { useLocale, useTranslations } from "next-intl";
 import { useEffect, useState } from "react";
 
@@ -27,7 +28,13 @@ type Node = {
   locked: boolean;
   children: Node[];
 };
+type Cell = { kind: "amount"; quota: number } | { kind: "missing" } | { kind: "before" };
+type Snapshot = { gatewayId: string; gatewayName: string; days: string[]; rows: { id: string; name: string; upstreamId: number; imported: boolean; cells: Cell[]; total: number | null }[] };
+type Choice = { id: string; name: string; kind: string };
 type Page = {
+  mode?: "recon" | "snapshot";
+  snapshot?: Snapshot | null;
+  choices?: Choice[];
   month: string;
   months: string[];
   locked: boolean;
@@ -54,6 +61,7 @@ export function ReconView() {
   const errors = useTranslations("errors");
   const locale = useLocale();
   const [month, setMonth] = useState("");
+  const [gatewayId, setGatewayId] = useState("");
   const [data, setData] = useState<Page | null>(null);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
@@ -63,15 +71,18 @@ export function ReconView() {
   const [rebind, setRebind] = useState<{ id: string; name: string } | null>(null);
   const [rebindId, setRebindId] = useState("");
 
-  async function load(next = month) {
-    const res = await fetch(`/api/recon${next ? `?month=${encodeURIComponent(next)}` : ""}`, { cache: "no-store" });
+  async function load(next = month, gateway = gatewayId) {
+    const params = new URLSearchParams();
+    if (next) params.set("month", next);
+    if (gateway) params.set("gateway", gateway);
+    const res = await fetch(`/api/recon?${params.toString()}`, { cache: "no-store" });
     if (!res.ok) {
       setError(errors("billingLoadFailed"));
       return;
     }
     const body = (await res.json()) as Page;
     setData(body);
-    setMonth(body.month);
+    if (typeof body.month === "string") setMonth(body.month);
     setError("");
   }
 
@@ -96,6 +107,50 @@ export function ReconView() {
   }
 
   if (!hydrated || !data) return <p className="text-sm text-muted">{t("loading")}</p>;
+  const gatewaySelect = (
+    <select className="h-9 max-w-full rounded-control border-0 bg-input px-3 text-sm" value={gatewayId} aria-label={t("allGateways")} onChange={(event) => { setGatewayId(event.target.value); void load(month, event.target.value); }}>
+      <option value="">{t("allGateways")}</option>
+      {(data.choices ?? []).map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+    </select>
+  );
+  if (data.mode === "snapshot" && data.snapshot) {
+    const grid = data.snapshot;
+    return (
+      <div>
+        <PageHeader title={t("title")} description={t("snapshotBill")} extra={gatewaySelect} />
+        <Card className="overflow-x-auto">
+          <table className="w-full min-w-[48rem] text-left text-sm">
+            <thead className="text-xs text-secondary">
+              <tr>
+                <th className="whitespace-nowrap px-3 py-3 font-medium">{t("columns.name")}</th>
+                {grid.days.map((day) => <th key={day} className="whitespace-nowrap px-3 py-3 font-medium">{day.slice(5)}</th>)}
+                <th className="whitespace-nowrap px-3 py-3 font-medium">{t("sevenDay")}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {grid.rows.map((row) => (
+                <tr key={row.id} className="border-t border-line">
+                  <td className="px-3 py-3">
+                    <div className="flex flex-wrap items-center gap-2 font-medium">
+                      <span className="break-words">#{row.upstreamId} {row.name}</span>
+                      {row.imported ? <span className="whitespace-nowrap rounded-full bg-input px-2 py-0.5 text-[11px] font-normal text-muted">{t("importedTag")}</span> : null}
+                      <span className="whitespace-nowrap rounded-full px-2 py-0.5 text-[11px] font-medium" style={{ background: "rgba(48,176,199,0.15)", color: "#0E7490" }}>{t("snapshotTag")}</span>
+                    </div>
+                  </td>
+                  {row.cells.map((cell, index) => (
+                    <td key={grid.days[index]} className={`whitespace-nowrap px-3 py-3 tabular-nums ${cell.kind === "missing" ? "bg-[repeating-linear-gradient(135deg,transparent,transparent_4px,rgba(0,0,0,0.04)_4px,rgba(0,0,0,0.04)_5px)] text-muted" : ""}`}>
+                      {cell.kind === "amount" ? formatUsd(cell.quota, locale) : cell.kind === "missing" ? t("missingData") : "—"}
+                    </td>
+                  ))}
+                  <td className="whitespace-nowrap px-3 py-3 font-medium tabular-nums">{row.total === null ? "—" : formatUsd(row.total, locale)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </Card>
+      </div>
+    );
+  }
   const admin = user?.role === "admin";
   const pendingLabel = tab === "daily" ? t("pendingWork") : t("pending");
   const slices = [
@@ -139,7 +194,8 @@ export function ReconView() {
           <a className={buttonClass("secondary", "h-9 text-sm")} href={`/api/recon/export?month=${encodeURIComponent(month)}`}>{t("export")}</a>
         </Card>
       ) : (
-        <div className="mb-4">
+        <div className="mb-4 flex flex-wrap gap-2">
+          {gatewaySelect}
           <select className="h-9 rounded-control border-0 bg-input px-3 text-sm" value={month} aria-label={t("month")} onChange={(event) => { setMonth(event.target.value); void load(event.target.value); }}>
             {data.months.length === 0 ? <option value="">{t("nonePublished")}</option> : data.months.map((item) => <option key={item}>{item}</option>)}
           </select>
