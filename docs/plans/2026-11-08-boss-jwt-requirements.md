@@ -42,6 +42,7 @@
 - 创建服务：`lib/channel-service.ts` → `createChannels` / `owned` / `supplierNotOwned`
 - 上游：供应商站 `POST /api/channel/`；搜索优先本地库，必要时 `GET /api/channel/search`
 - 鉴权：账密落库；access 短期票；过期 refresh，失败密码重登（已有 `a7e848b` 行为，UI 文案对齐即可）
+- **Bug (live):** `lib/gateways.ts` public `tokenSet` is `kind === "newapi_seller" ? Boolean(password_cipher) : Boolean(token_cipher)`. For `newapi_supplier` this is wrong — password is in `password_cipher`, so UI shows「缺少令牌/令牌失效」even when `authStatus=ok`. Fix: treat supplier like seller for `tokenSet` (`password_cipher`), and the settings status pill must use `authStatus` for JWT kinds, never admin-token copy.
 
 ## 关联文档
 

@@ -20,6 +20,8 @@
 
 内部仍可存 JWT/refresh（服务端密文），前端与文案一律当「账密会话」，不叫令牌管理。
 
+**实现提示 · Bug (live):** `lib/gateways.ts` 的公开 `tokenSet` 现为 `kind === "newapi_seller" ? Boolean(password_cipher) : Boolean(token_cipher)`。`newapi_supplier` 的密码在 `password_cipher`，于是 `authStatus=ok` 时 UI 仍显示「缺少令牌/令牌失效」。修法：supplier 与 seller 一样用 `password_cipher` 算 `tokenSet`；JWT 种类的设置状态 pill 只看 `authStatus`，禁止管理令牌文案。
+
 ---
 
 ## 1. 渠道列表 · 关键词搜索（先上 · 必过）
