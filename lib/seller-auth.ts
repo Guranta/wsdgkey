@@ -301,7 +301,9 @@ export async function ensureSellerAccess(gatewayId: string, options: { now?: num
         await markFailed(gatewayId, message, now);
         throw error;
       }
-      if (status !== 401 && message !== "refreshUnauthorized") {
+      // 401 未授权、403 Access denied（含 Origin 被拒/会话被新登录顶掉）都回退密码重登（计划 §4）；
+      // 其余（网络等）也交给 passwordLogin 再试一次，失败由小时级登录上限兜底
+      if (status === 0 || status >= 500) {
         const text = safeMessage(message, [password, cached, cookie, sid]);
         await markFailed(gatewayId, text || "sellerAuthFailed", now);
         throw error;
