@@ -283,8 +283,15 @@ export async function createSupplierGateway(
   );
   await persistSeller(id, session, now);
   const created = await getGateway(id);
-  if (!created) throw Object.assign(new Error("gatewaySaveFailed"), { status: 500 });
-  return publicGateway(created);
+  if (created) {
+    // 拉一次 profile：填 supplier_label（创建认领的前缀匹配与设置页展示都靠它）
+    await import("./gateway-adapter")
+      .then(({ fetchSupplierProfile }) => fetchSupplierProfile(created))
+      .catch(() => undefined);
+  }
+  const fresh = await getGateway(id);
+  if (!fresh) throw Object.assign(new Error("gatewaySaveFailed"), { status: 500 });
+  return publicGateway(fresh);
 }
 
 export async function createSellerGateway(

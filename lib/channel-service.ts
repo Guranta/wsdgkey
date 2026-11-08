@@ -456,7 +456,12 @@ async function createSupplierChannels(actor: SessionUser, gateway: GatewaySecret
   const api = gatewayApi(gateway);
   const candidates = api.search ? await api.search(form.name) : [];
   for (const item of candidates) {
-    const match = item.name === form.name || item.name === `${prefix}-${form.name}` || (prefix && item.name === `${prefix}${form.name}`);
+    const match =
+      item.name === form.name ||
+      item.name.endsWith(`-${form.name}`) ||
+      item.name.endsWith(form.name) && prefix && item.name.startsWith(prefix) ||
+      item.name === `${prefix}-${form.name}` ||
+      (prefix && item.name === `${prefix}${form.name}`);
     if (!match || item.owned !== true) continue;
     const id = await rememberChannel(gateway.id, item, actor.id, fingerprint(keys[0] ?? ""));
     if (id) {
