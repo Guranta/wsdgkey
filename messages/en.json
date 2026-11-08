@@ -172,7 +172,8 @@
     "sellerCannotWrite": "This supplier account cannot add or edit channels",
     "sellerCannotToggle": "This supplier account cannot enable or disable channels",
     "supplierNotOwned": "This channel is read-only for this supplier account",
-    "supplierForbidden": "The site does not allow this action"
+    "supplierForbidden": "The site does not allow this action",
+    "supplierSingleKey": "Supplier JWT gateways accept exactly one key per channel"
   },
   "channels": {
     "loading": "Loading channels…",
@@ -327,7 +328,10 @@
     "readonlyTag": "Read-only",
     "importSplit": "Manageable {managed} · visible-only {visible}",
     "noManageable": "No manageable channels yet",
-    "importBillingNote": "Import never touches upstream settings or status; billing starts from the first 00:00 snapshot after import."
+    "importBillingNote": "Import never touches upstream settings or status; billing starts from the first 00:00 snapshot after import.",
+    "searchAction": "Search",
+    "mineOnly": "Created here",
+    "mineEmpty": "No keys added through this console yet"
   },
   "drawer": {
     "editTitle": "Edit {name}",
@@ -440,7 +444,8 @@
     },
     "disableStore": "Disable store passthrough",
     "vertexKeyPlaceholder": "{\"type\":\"service_account\",\"project_id\":…} full service-account JSON",
-    "vertexDropHint": "Drop a .json key file here, or paste the whole JSON (arrays work too)"
+    "vertexDropHint": "Drop a .json key file here, or paste the whole JSON (arrays work too)",
+    "supplierNote": "Supplier JWT gateway: some fields and actions are unavailable; the site may prefix the saved name."
   },
   "billing": {
     "loading": "Loading the bill…",
@@ -687,7 +692,9 @@
     "kindSupplier": "Supplier JWT",
     "supplierOriginNote": "Refreshes carry the site's own Origin and Referer; a wrong Origin returns AUTH_ORIGIN_FORBIDDEN.",
     "supplierTlsNote": "If the site serves HTTPS with an IP + self-signed certificate, the deployer must set a per-host TLS exception (tls_exception_host) or the connection will fail.",
-    "supplierSaveTests": "Saving performs a real login once to verify the credentials."
+    "supplierSaveTests": "Saving performs a real login once to verify the credentials.",
+    "needRelogin": "Re-login needed",
+    "supplierReloginTip": "Session expired; re-enter the account password under Settings › Gateways and test the connection"
   },
   "users": {
     "loading": "Loading accounts…",

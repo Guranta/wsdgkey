@@ -144,6 +144,7 @@ export function ChannelDrawer({
   editing,
   busy,
   seller = false,
+  supplier = false,
   onClose,
   onSave,
   onTest,
@@ -152,6 +153,7 @@ export function ChannelDrawer({
   editing: DrawerChannel | null;
   busy: boolean;
   seller?: boolean;
+  supplier?: boolean;
   onClose: () => void;
   onSave: (body: Record<string, unknown>) => Promise<string | void>;
   onTest: (id: string, model: string) => Promise<void>;
@@ -393,6 +395,7 @@ export function ChannelDrawer({
           <h2 id="channel-drawer-title" className="text-lg font-semibold">{editing ? t("editTitle", { name: editing.name }) : t("addTitle")}</h2>
           <p className="mt-1 text-xs text-muted">{t("parity")}</p>
           {seller ? <p className="mt-3 rounded-control bg-input px-3 py-2 text-xs leading-5 text-secondary">{t("sellerNote")}</p> : null}
+          {supplier ? <p className="mt-3 rounded-control bg-warn-soft px-3 py-2 text-xs leading-5 text-warn">{t("supplierNote")}</p> : null}
           <div className="mt-3 flex flex-wrap gap-1 rounded-full bg-input p-1" role="tablist" aria-label={t("tabsLabel")}>
             {(["connection", "routing", "request", "other"] as const).map((item) => (
               <button
@@ -807,7 +810,7 @@ export function ChannelDrawer({
         </div>
         <div className="flex justify-end gap-2 border-t border-line px-5 py-4">
           <button type="button" className={buttonClass("secondary")} onClick={onClose}>{common("cancel")}</button>
-          <button type="button" className={buttonClass("secondary")} disabled={busy || !editing} title={editing ? undefined : t("testAfterSave")} onClick={() => { if (editing) void onTest(editing.id, form.test_model || ""); }}>{t("testConnection")}</button>
+          {supplier ? null : <button type="button" className={buttonClass("secondary")} disabled={busy || !editing} title={editing ? undefined : t("testAfterSave")} onClick={() => { if (editing) void onTest(editing.id, form.test_model || ""); }}>{t("testConnection")}</button>}
           <button type="submit" className={buttonClass("primary")} disabled={busy}>{busy ? common("saving") : editing ? t("updateChannel") : t("createChannel")}</button>
         </div>
       </form>

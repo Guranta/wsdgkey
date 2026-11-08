@@ -258,8 +258,8 @@ export function SettingsView() {
                       {t("channelCount", { count: item.channelCount ?? 0 })}
                     </div>
                   </div>
-                  <span className={`whitespace-nowrap rounded-full px-2 py-0.5 text-xs ${item.disabled ? "bg-input text-muted" : failed ? "bg-warn-soft text-warn" : item.tokenSet || item.demo ? "bg-ok-soft text-ok" : "bg-danger-soft text-danger"}`}>
-                    {item.disabled ? t("deactivated") : failed ? t("connectionError") : item.tokenSet || item.demo ? t("connected") : t("tokenInvalid")}
+                  <span title={item.kind === "newapi_supplier" && (failed || !item.tokenSet) ? t("supplierReloginTip") : undefined} className={`whitespace-nowrap rounded-full px-2 py-0.5 text-xs ${item.disabled ? "bg-input text-muted" : failed ? "bg-warn-soft text-warn" : item.tokenSet || item.demo ? "bg-ok-soft text-ok" : "bg-danger-soft text-danger"}`}>
+                    {item.disabled ? t("deactivated") : item.kind === "newapi_supplier" && (failed || !item.tokenSet) ? t("needRelogin") : failed ? t("connectionError") : item.tokenSet || item.demo ? t("connected") : t("tokenInvalid")}
                   </span>
                 </div>
                 <div className="mt-2 flex flex-wrap gap-2">

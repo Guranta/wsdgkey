@@ -324,6 +324,8 @@ export async function queryChannels(actor: SessionUser, search: URLSearchParams)
     params.push(Number(type));
   }
   pushKeyword(where, params, keyword);
+  // 「本系统上的」：只看经本上号器创建/录入的 key（排除导入的站点原有渠道；供应商 JWT 场景可管行必含）
+  if (search.get("mine") === "1") where.push("COALESCE(c.origin, 'created') <> 'imported'");
   const day = shanghaiClock().day;
   const filtered = where.join(" AND ");
   const counted = (await dbGet(
@@ -425,6 +427,54 @@ function formFromRow(row: ChannelRow): Partial<ChannelFormValues> {
   });
 }
 
+async function createSupplierChannels(actor: SessionUser, gateway: GatewaySecret, body: Record<string, unknown>) {
+  const form = formFromInput(body);
+  const keys = splitKeys(form.key);
+  const error = validateChannelForm(form, false);
+  if (error) throw httpError(error, 400);
+  if (keys.length !== 1) throw httpError("supplierSingleKey", 400);
+  const channelBody: Record<string, unknown> = {
+    name: form.name,
+    type: form.type,
+    key: keys[0],
+    models: form.models,
+    group: Array.isArray(form.group) ? form.group.join(",") : form.group,
+  };
+  if (form.base_url?.trim()) channelBody.base_url = form.base_url.trim();
+  if (form.remark?.trim()) channelBody.remark = form.remark.trim();
+  const channel = { mode: "single", channel: channelBody };
+  try {
+    await gatewayApi(gateway).create(channel);
+  } catch (cause) {
+    await audit(actor, null, null, "create", "fail", cause instanceof Error ? cause.message : "createFailed");
+    throw cause;
+  }
+  // 认领：按名称在列表里找回（站点可能给名称加 supplier_label- 前缀，按包含匹配）
+  const createdIds: string[] = [];
+  let claimed = 0;
+  const prefix = String((await dbGet("SELECT supplier_label FROM gateways WHERE id = ?", [gateway.id]))?.supplier_label ?? "");
+  for (let page = 1; page <= 10; page += 1) {
+    const listed = await gatewayApi(gateway).list(page);
+    for (const item of listed.items) {
+      const match = item.name === form.name || item.name === `${prefix}-${form.name}` || (prefix && item.name === `${prefix}${form.name}`);
+      if (!match || Number(item.owned) !== 1 && item.owned !== true) {
+        if (match) claimed += 1;
+        continue;
+      }
+      const id = await rememberChannel(gateway.id, item, actor.id, fingerprint(keys[0] ?? ""));
+      if (id) {
+        await dbRun("UPDATE channels SET created_here = 1, creator_user_id = ?, origin = 'created' WHERE id = ?", [actor.id, id]);
+        await ensureBinding(id, gateway.id, item.id, 0);
+        createdIds.push(id);
+        claimed += 1;
+      }
+    }
+    if (claimed >= 1 || page * 20 >= listed.total) break;
+  }
+  await audit(actor, createdIds[0] ?? null, null, "create", "ok", `created ${claimed}`);
+  return { created: claimed, ids: createdIds, duplicateKeys: 0, tests: [] };
+}
+
 async function createSellerChannels(actor: SessionUser, gateway: GatewaySecret, body: Record<string, unknown>) {
   if (!gateway.canWrite) throw httpError("sellerCannotWrite", 400);
   const form = formFromInput(body);
@@ -487,6 +537,7 @@ export async function createChannels(actor: SessionUser, body: Record<string, un
   if (!gateway) throw httpError("gatewayRequired", 400);
   if (actor.role !== "admin" && gateway.kind === "newapi_seller" && gateway.ownerUserId !== actor.id) throw httpError("gatewayMissing", 404);
   if (gateway.kind === "newapi_seller") return createSellerChannels(actor, gateway, body);
+  if (gateway.kind === "newapi_supplier") return createSupplierChannels(actor, gateway, body);
   const form = formFromInput(body);
   const keys = splitKeys(form.key);
   if (keys.length > 1 && (!form.multi_key_mode || form.multi_key_mode === "single")) form.multi_key_mode = "batch";
@@ -626,7 +677,16 @@ export async function updateChannel(actor: SessionUser, id: string, body: Record
   const error = validateChannelForm(form, true);
   if (error) throw httpError(error, 400);
   if (gateway.kind === "newapi_supplier" && Number(row.owned ?? 0) !== 1) throw httpError("supplierNotOwned", 403);
-  const payload = transformFormDataToUpdatePayload(form, Number(row.upstream_id));
+  const payload =
+    gateway.kind === "newapi_supplier"
+      ? (() => {
+          const minimal: Record<string, unknown> = { id: Number(row.upstream_id), name: form.name, models: form.models };
+          if (form.key.trim()) minimal.key = splitKeys(form.key)[0] ?? "";
+          if (form.base_url?.trim()) minimal.base_url = form.base_url.trim();
+          if (form.remark?.trim()) minimal.remark = form.remark.trim();
+          return minimal;
+        })()
+      : transformFormDataToUpdatePayload(form, Number(row.upstream_id));
   try {
     await gatewayApi(gateway).update(payload);
   } catch (cause) {

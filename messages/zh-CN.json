@@ -172,7 +172,8 @@
     "sellerCannotWrite": "这个供应商账号不能添加或修改渠道",
     "sellerCannotToggle": "这个供应商账号不能启用或禁用渠道",
     "supplierNotOwned": "该渠道仅可见，供应商账号不可修改",
-    "supplierForbidden": "该站点未开放此操作"
+    "supplierForbidden": "该站点未开放此操作",
+    "supplierSingleKey": "供应商 JWT 网关一次只能录入一条密钥"
   },
   "channels": {
     "loading": "正在读取渠道…",
@@ -327,7 +328,10 @@
     "readonlyTag": "不可管",
     "importSplit": "可管 {managed} · 仅可见 {visible}",
     "noManageable": "暂无可管理渠道",
-    "importBillingNote": "导入不修改渠道设置与状态；计费从导入后第一个 0:00 快照起算。"
+    "importBillingNote": "导入不修改渠道设置与状态；计费从导入后第一个 0:00 快照起算。",
+    "searchAction": "搜索",
+    "mineOnly": "本系统上的",
+    "mineEmpty": "还没有通过本系统上的 key"
   },
   "drawer": {
     "editTitle": "修改 {name}",
@@ -440,7 +444,8 @@
     },
     "disableStore": "禁用 store 透传",
     "vertexKeyPlaceholder": "{\"type\":\"service_account\",\"project_id\":…} 整份服务账号 JSON",
-    "vertexDropHint": "可以把 .json 密钥文件直接拖进来，或粘贴整份 JSON（数组也行）"
+    "vertexDropHint": "可以把 .json 密钥文件直接拖进来，或粘贴整份 JSON（数组也行）",
+    "supplierNote": "此网关为供应商 JWT，部分字段与操作不可用；名称保存后可能带站点前缀。"
   },
   "billing": {
     "loading": "正在读取账单…",
@@ -687,7 +692,9 @@
     "kindSupplier": "供应商 JWT",
     "supplierOriginNote": "刷新由代理带上该站点自身的 Origin 和 Referer；错误 Origin 会返回 AUTH_ORIGIN_FORBIDDEN。",
     "supplierTlsNote": "该站若以 IP + 自签证书提供 HTTPS，需由部署者为该主机配置证书例外（tls_exception_host），否则连接会失败。",
-    "supplierSaveTests": "保存时会用该账号实际登录一次以验证凭据。"
+    "supplierSaveTests": "保存时会用该账号实际登录一次以验证凭据。",
+    "needRelogin": "需重新登录",
+    "supplierReloginTip": "会话失效，请到设置 › 网关重新填写账号密码并测试连接"
   },
   "users": {
     "loading": "正在读取账号…",

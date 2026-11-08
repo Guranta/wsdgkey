@@ -79,7 +79,7 @@ function present(row: GatewayRow): GatewayPublic {
     baseUrl: row.base_url,
     adminUserId: row.admin_user_id,
     demo: Number(row.demo) === 1,
-    tokenSet: kind === "newapi_seller" ? Boolean(row.password_cipher) : Boolean(row.token_cipher),
+    tokenSet: kind === "newapi_admin" ? Boolean(row.token_cipher) : Boolean(row.password_cipher),
     tokenMasked: kind === "newapi_seller" ? "" : maskedToken(row),
     createdAt: Number(row.created_at),
     disabled: Number(row.disabled ?? 0) === 1,

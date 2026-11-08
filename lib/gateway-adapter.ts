@@ -179,8 +179,9 @@ function supplierApi(gateway: GatewaySecret): GatewayApi {
       const body = await queued(gateway, `channel:${id}`, () => sellerCall<{ data?: unknown }>(gateway, `/api/channel/${id}`));
       return parseChannel(body.data);
     },
-    async create(): Promise<void> {
-      return forbidden("create");
+    async create(payload): Promise<void> {
+      // 2026-11-08 老板需求：提前放开上 key。最小提交体 {mode:"single", channel}
+      await queued(gateway, "mutate", () => sellerCall(gateway, "/api/channel/", { method: "POST", body: JSON.stringify(payload) }), 90_000);
     },
     async update(payload) {
       // owned 守卫在 channel-service 的 updateChannel（supplierNotOwned）；这里只负责 PUT

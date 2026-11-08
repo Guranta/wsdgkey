@@ -130,6 +130,7 @@ export function ChannelsView() {
   const [creator, setCreator] = useState("");
   const [status, setStatus] = useState("");
   const [type, setType] = useState("");
+  const [mine, setMine] = useState(false);
   const [sort, setSort] = useState<ChannelSort>("id");
   const [dir, setDir] = useState<"asc" | "desc">("desc");
   const [page, setPage] = useState(1);
@@ -158,11 +159,12 @@ export function ChannelsView() {
     if (creator) params.set("creator", creator);
     if (status) params.set("status", status);
     if (type) params.set("type", type);
+    if (mine) params.set("mine", "1");
     if (sort !== "id") params.set("sort", sort);
     if (dir !== "desc") params.set("dir", dir);
     params.set("page", String(page));
     return params.toString();
-  }, [gateway, queryKeyword, group, creator, status, type, sort, dir, page]);
+  }, [gateway, queryKeyword, group, creator, status, type, mine, sort, dir, page]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => setQueryKeyword(keyword), 300);
@@ -416,16 +418,20 @@ export function ChannelsView() {
                   return <option key={item.id} value={item.id}>{item.name}{host ? ` · ${host}` : ""}{item.demo ? ` · ${common("demo")}` : ""}</option>;
                 })}
               </select>
-              <span title={!gateway ? t("addDisabledTip") : atLimit ? t("atSiteLimit") : undefined} className={supplierGateway ? "hidden" : undefined}>
+              <span title={!gateway ? t("addDisabledTip") : atLimit ? t("atSiteLimit") : undefined} className={!gateway ? undefined : undefined}>
                 <button type="button" className={buttonClass("primary", "h-9")} onClick={() => setDrawer("add")} disabled={!gateway || atLimit || (sellerGateway && liveCap?.canWrite === false)}>{t("add")}</button>
               </span>
               {sellerGateway || supplierGateway ? <button type="button" className={buttonClass("secondary", "h-9")} disabled={importing || !gateway} onClick={() => void runImport()}>{importing ? t("loading") : t("importExisting")}</button> : null}
-              <div className="ml-auto">
+              <div className="ml-auto flex items-center gap-2">
+                {user?.role === "admin" ? (
+                  <button type="button" className={mine ? "whitespace-nowrap rounded-full bg-foreground px-3.5 py-1.5 text-sm font-semibold text-card shadow-sm" : "whitespace-nowrap rounded-full px-3.5 py-1.5 text-sm text-secondary hover:bg-hover"} aria-pressed={mine} onClick={() => { setMine((value) => !value); setPage(1); }}>{t("mineOnly")}</button>
+                ) : null}
                 <button type="button" className={buttonClass("ghost", "h-9 text-sm")} onClick={() => setFiltersOpen((value) => !value)}>{filtersOpen ? t("collapse") : t("filtersCollapsed")}</button>
               </div>
             </div>
             <div className="flex flex-wrap items-center gap-2">
-              <ChipSearch value={keyword} placeholder={t("keywordPlaceholder")} recognized={parsedKeyword.recognized} onChange={(value) => { setKeyword(value); setPage(1); }} />
+              <ChipSearch value={keyword} placeholder={t("keywordPlaceholder")} recognized={parsedKeyword.recognized} onChange={(value) => { setKeyword(value); setPage(1); }} onSearch={() => setBump((value) => value + 1)} />
+              <button type="button" className={buttonClass("secondary", "h-9 shrink-0")} onClick={() => setBump((value) => value + 1)}>{t("searchAction")}</button>
               {loading ? <span className="text-xs text-muted">{t("loading")}</span> : null}
               {data.truncated ? <span className="text-xs text-warn">{t("searchTruncated", { count: CHANNEL_ID_SEARCH_CAP })}</span> : null}
               {filtersOpen ? (
@@ -498,6 +504,7 @@ export function ChannelsView() {
                         </div>
                       )}
                       {data.gateways.length && !filtered ? <button type="button" className={buttonClass("primary", "mt-4")} onClick={() => setDrawer("add")}>{t("add")}</button> : null}
+                      {mine && !keyword && filtered ? <p className="mt-2 text-sm text-muted">{t("mineEmpty")}</p> : null}
                     </td></tr>
                   ) : items.map((item) => {
                     const tone = item.upstreamMissing ? "warn" : item.status === "enabled" ? "ok" : item.autoDisabled ? "danger" : "manual";
@@ -582,6 +589,7 @@ export function ChannelsView() {
           gatewayId={gateway}
           editing={drawer === "add" ? null : drawer}
           seller={sellerGateway}
+          supplier={supplierGateway}
           busy={busy}
           onClose={() => setDrawer(null)}
           onSave={saveDrawer}
@@ -776,19 +784,19 @@ export function QueueStrip({ queue, admin }: { queue: QueueSnap; admin: boolean 
   );
 }
 
-function ChipSearch({ value, placeholder, recognized, onChange }: { value: string; placeholder: string; recognized: number; onChange: (value: string) => void }) {
+function ChipSearch({ value, placeholder, recognized, onChange, onSearch }: { value: string; placeholder: string; recognized: number; onChange: (value: string) => void; onSearch?: () => void }) {
   const t = useTranslations("channels");
   const parsed = parseChannelKeyword(value);
   const chips = parsed.ids;
   return (
-    <div className="flex min-w-64 flex-1 flex-wrap items-center gap-1 rounded-control bg-input px-2 py-1">
+    <form className="flex min-w-64 flex-1 flex-wrap items-center gap-1 rounded-control bg-input px-2 py-1" onSubmit={(event) => { event.preventDefault(); onSearch?.(); }}>
       {chips.slice(0, 8).map((id) => (
         <button key={id} type="button" className="rounded-full bg-card px-2 py-0.5 text-xs" onClick={() => onChange(value.replace(new RegExp(`(^|[^\\d])${id}(?!\\d)`), "$1").replace(/\s{2,}/g, " ").trim())}>#{id} ×</button>
       ))}
       {chips.length > 8 ? <span className="rounded-full bg-primary px-2 py-0.5 text-xs text-primary-foreground">{t("idCount", { count: chips.length })}</span> : null}
       <input className="h-7 min-w-32 flex-1 bg-transparent text-sm outline-none" value={parsed.text || parsed.names.join(" ")} placeholder={chips.length ? "" : placeholder} onChange={(event) => onChange([chips.join(","), event.target.value].filter(Boolean).join(chips.length ? ", " : ""))} />
       {recognized > 1 ? <span className="text-xs text-secondary">{t("recognizedSearch", { count: recognized })}</span> : null}
-    </div>
+    </form>
   );
 }
 
