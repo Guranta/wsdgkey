@@ -42,10 +42,22 @@
 - 创建服务：`lib/channel-service.ts` → `createChannels` / `owned` / `supplierNotOwned`
 - 上游：供应商站 `POST /api/channel/`；搜索优先本地库，必要时 `GET /api/channel/search`
 - 鉴权：账密落库；access 短期票；过期 refresh，失败密码重登（已有 `a7e848b` 行为，UI 文案对齐即可）
-- **Bug (live):** `lib/gateways.ts` public `tokenSet` is `kind === "newapi_seller" ? Boolean(password_cipher) : Boolean(token_cipher)`. For `newapi_supplier` this is wrong — password is in `password_cipher`, so UI shows「缺少令牌/令牌失效」even when `authStatus=ok`. Fix: treat supplier like seller for `tokenSet` (`password_cipher`), and the settings status pill must use `authStatus` for JWT kinds, never admin-token copy.
 
 ## 关联文档
 
 - `docs/plans/2026-11-08-jwt-channels-diff.md` — 设计差异说明（权威 UI 规格）
+- `docs/plans/2026-11-08-jwt-channels-acceptance.md` — 测试必过增量（AUTH-S-09… / CH-S-11…）
+- 冒烟基线缺陷（补丁前）：jwt 网关曾显示「已停用」「缺少令牌」——实现后 AUTH-S-09…12 必须清掉
 - 计划原文：`docs/plans/2026-11-05-supplier-jwt-gateway.md`（若仓库已有）
 - DESIGN v2.2 §9.1 / §9.6
+
+## 附加（老板 2026-11-08 补）：「本系统上的 key」一键筛选
+
+上 key 的**管理员账号**视角：渠道列表增加一个按钮（文案建议：「本系统上的」/「我上的 key」）。
+
+- 点一下：只显示**通过本上号器创建/录入**的渠道（`created_here=1` 且本系统归属；供应商 JWT 场景优先 `owned=true` 可管行，或明确标记 origin=created / created_here）。
+- 再点或「全部」：恢复完整列表（含导入只读行）。
+- 与关键词搜索可叠加；空态：「还没有通过本系统上的 key」+ 引导「添加渠道」。
+- 目的：管理员一眼区分「站点原有导入」vs「经本系统上的」。
+
+实现提示：列表已有 `createdHere` / `owned` / `origin` 字段；做前端 filter 或 `?mine=1` / `?createdHere=1` 查询参数即可。
