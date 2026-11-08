@@ -449,27 +449,23 @@ async function createSupplierChannels(actor: SessionUser, gateway: GatewaySecret
     await audit(actor, null, null, "create", "fail", cause instanceof Error ? cause.message : "createFailed");
     throw cause;
   }
-  // 认领：按名称在列表里找回（站点可能给名称加 supplier_label- 前缀，按包含匹配）
+  // 认领：优先站点搜索接口一击命中（id_sort 方向不稳定，翻页不可靠）
   const createdIds: string[] = [];
   let claimed = 0;
   const prefix = String((await dbGet("SELECT supplier_label FROM gateways WHERE id = ?", [gateway.id]))?.supplier_label ?? "");
-  for (let page = 1; page <= 10; page += 1) {
-    const listed = await gatewayApi(gateway).list(page);
-    for (const item of listed.items) {
-      const match = item.name === form.name || item.name === `${prefix}-${form.name}` || (prefix && item.name === `${prefix}${form.name}`);
-      if (!match || Number(item.owned) !== 1 && item.owned !== true) {
-        if (match) claimed += 1;
-        continue;
-      }
-      const id = await rememberChannel(gateway.id, item, actor.id, fingerprint(keys[0] ?? ""));
-      if (id) {
-        await dbRun("UPDATE channels SET created_here = 1, creator_user_id = ?, origin = 'created' WHERE id = ?", [actor.id, id]);
-        await ensureBinding(id, gateway.id, item.id, 0);
-        createdIds.push(id);
-        claimed += 1;
-      }
+  const api = gatewayApi(gateway);
+  const candidates = api.search ? await api.search(form.name) : [];
+  for (const item of candidates) {
+    const match = item.name === form.name || item.name === `${prefix}-${form.name}` || (prefix && item.name === `${prefix}${form.name}`);
+    if (!match || item.owned !== true) continue;
+    const id = await rememberChannel(gateway.id, item, actor.id, fingerprint(keys[0] ?? ""));
+    if (id) {
+      await dbRun("UPDATE channels SET created_here = 1, creator_user_id = ?, origin = 'created' WHERE id = ?", [actor.id, id]);
+      await ensureBinding(id, gateway.id, item.id, 0);
+      createdIds.push(id);
+      claimed += 1;
+      break;
     }
-    if (claimed >= 1 || page * 20 >= listed.total) break;
   }
   await audit(actor, createdIds[0] ?? null, null, "create", "ok", `created ${claimed}`);
   return { created: claimed, ids: createdIds, duplicateKeys: 0, tests: [] };

@@ -504,7 +504,7 @@ export function ChannelsView() {
                         </div>
                       )}
                       {data.gateways.length && !filtered ? <button type="button" className={buttonClass("primary", "mt-4")} onClick={() => setDrawer("add")}>{t("add")}</button> : null}
-                      {mine && !keyword && filtered ? <p className="mt-2 text-sm text-muted">{t("mineEmpty")}</p> : null}
+                      {mine && !keyword && !filtered ? <p className="mt-2 text-sm text-muted">{t("mineEmpty")}</p> : null}
                     </td></tr>
                   ) : items.map((item) => {
                     const tone = item.upstreamMissing ? "warn" : item.status === "enabled" ? "ok" : item.autoDisabled ? "danger" : "manual";

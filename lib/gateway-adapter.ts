@@ -28,6 +28,7 @@ export type ChannelPage = {
 export type GatewayApi = {
   kind: "newapi_admin" | "newapi_seller" | "newapi_supplier";
   list(page: number): Promise<ChannelPage>;
+  search?(keyword: string): Promise<UpstreamChannel[]>;
   get(id: number): Promise<UpstreamChannel | null>;
   create(payload: Record<string, unknown>): Promise<void>;
   update(payload: Record<string, unknown>): Promise<void>;
@@ -178,6 +179,13 @@ function supplierApi(gateway: GatewaySecret): GatewayApi {
     async get(id) {
       const body = await queued(gateway, `channel:${id}`, () => sellerCall<{ data?: unknown }>(gateway, `/api/channel/${id}`));
       return parseChannel(body.data);
+    },
+    async search(keyword: string) {
+      const body = await queued(gateway, "list", () =>
+        sellerCall<{ data?: { items?: unknown[] } }>(gateway, `/api/channel/search?keyword=${encodeURIComponent(keyword)}`),
+      );
+      const items = Array.isArray(body.data?.items) ? body.data.items.map(parseChannel).filter((item): item is UpstreamChannel => Boolean(item)) : [];
+      return items;
     },
     async create(payload): Promise<void> {
       // 2026-11-08 老板需求：提前放开上 key。最小提交体 {mode:"single", channel}
