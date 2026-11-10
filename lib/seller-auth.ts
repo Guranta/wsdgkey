@@ -5,6 +5,8 @@ import { decryptSecret, encryptSecret } from "./secret-box";
 
 /** Renew while more than this remains. Shorter than that, refresh before the call. */
 export const SELLER_RENEW_WITHIN_MS = 60_000;
+/** At most one forced re-auth per gateway in this window. A 403 from risk control must not become a login storm. */
+export const FORCED_RENEW_COOLDOWN_MS = 60_000;
 /** Password logins per gateway per hour. Refresh does not count. */
 export const SELLER_LOGIN_LIMIT = 3;
 const LOGIN_WINDOW_MS = 60 * 60 * 1000;
@@ -50,6 +52,7 @@ async function gatewayFetcher(gatewayId: string): Promise<Fetcher> {
 
 const locks = new Map<string, Promise<unknown>>();
 const probes = new Map<string, { baseUrl: string; username: string; passwordHash: string; session: SellerSession; expiresAt: number }>();
+const forcedRenewals = new Map<string, { startedAt: number; settled: boolean; promise: Promise<string> }>();
 
 export function withGatewayLock<T>(id: string, task: () => Promise<T>): Promise<T> {
   const prev = locks.get(id) ?? Promise.resolve();
@@ -321,7 +324,23 @@ export async function ensureSellerAccess(gatewayId: string, options: { now?: num
   });
 }
 
-export async function sellerRequest(gatewayId: string, baseUrl: string, path: string, init: RequestInit = {}, fetcher: Fetcher = fetch): Promise<unknown> {
+/** One forced renewal per gateway per cooldown. Callers already in that renewal share its promise. */
+function startForcedRenew(gatewayId: string, fetcher: Fetcher, now: number): Promise<string> | null {
+  const existing = forcedRenewals.get(gatewayId);
+  if (existing && !existing.settled) return existing.promise;
+  if (existing && now - existing.startedAt < FORCED_RENEW_COOLDOWN_MS) {
+    console.info(`seller renew skipped gateway=${gatewayId} cooldown`);
+    return null;
+  }
+  const entry = { startedAt: now, settled: false, promise: Promise.resolve("") };
+  entry.promise = ensureSellerAccess(gatewayId, { fetcher, force: true, now }).finally(() => {
+    entry.settled = true;
+  });
+  forcedRenewals.set(gatewayId, entry);
+  return entry.promise;
+}
+
+export async function sellerRequest(gatewayId: string, baseUrl: string, path: string, init: RequestInit = {}, fetcher: Fetcher = fetch, now = Date.now()): Promise<unknown> {
   if (fetcher === fetch) fetcher = await gatewayFetcher(gatewayId);
   const send = async (token: string) => {
     const headers = new Headers(init.headers);
@@ -354,7 +373,9 @@ export async function sellerRequest(gatewayId: string, baseUrl: string, path: st
   } catch (error) {
     const status = typeof error === "object" && error && "status" in error ? Number((error as { status?: number }).status) : 0;
     if (status !== 401 && status !== 403) throw error;
-    const next = await ensureSellerAccess(gatewayId, { fetcher, force: true });
+    const renewed = startForcedRenew(gatewayId, fetcher, now);
+    if (!renewed) throw error;
+    const next = await renewed;
     try {
       return await send(next);
     } catch (again) {
@@ -395,4 +416,5 @@ export async function takeProbe(probeId: string, input: { baseUrl: string; usern
 export function resetSellerAuthForTests(): void {
   locks.clear();
   probes.clear();
+  forcedRenewals.clear();
 }

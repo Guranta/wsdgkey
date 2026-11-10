@@ -107,7 +107,8 @@ test("a rejected catalog does not mark channels missing, and a verified list sti
         return true;
       },
     );
-    assert.equal(refreshes, 2);
+    assert.equal(refreshes, 1);
+    assert.equal(lines.some((line) => line.includes("seller renew skipped") && line.includes("gw-sup") && line.includes("cooldown")), true);
   } finally {
     console.info = original;
   }
