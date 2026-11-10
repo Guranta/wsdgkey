@@ -694,11 +694,69 @@ type CachedDay = {
   span: { span: boolean; spanDays: number; label: string };
 };
 
-/** Published chart totals. Keyed by bill day, rule version, and supplier scope. The open day is always recomputed. */
+/**
+ * Published chart totals. The key includes a data version, so a later snapshot or billing_rows
+ * write misses instead of serving a stale total. The open day is always recomputed.
+ * Publish and the dedup stamp still drop the day's entries.
+ */
 const publishedDayCache = new Map<string, CachedDay>();
 
-function publishedCacheKey(day: string, aggregation: unknown, scope: string, scopeParams: unknown[]): string {
-  return `${day}|${String(aggregation ?? "")}|${scope}|${scopeParams.map((item) => String(item)).join(",")}`;
+function publishedCacheKey(day: string, aggregation: unknown, scope: string, scopeParams: unknown[], version: string): string {
+  return `${day}|${String(aggregation ?? "")}|${scope}|${scopeParams.map((item) => String(item)).join(",")}|${version}`;
+}
+
+function dayMark(row: Row | undefined): string {
+  if (!row) return "0|0|0";
+  return `${Number(row.n) || 0}|${Number(row.marker) || 0}|${Number(row.total) || 0}`;
+}
+
+/**
+ * One grouped read for billing_rows and one for billing_snapshots, covering the chart window.
+ * billing_rows has no updated_at. count and max(rowid) catch inserts and deletes; the consumption
+ * sum catches a rewrite of an existing row, which keeps the same rowid.
+ * A bill day d depends on snapshots for d and d+1.
+ */
+async function loadWindowVersions(
+  days: string[],
+  scope: string,
+  scopeParams: unknown[],
+): Promise<{ rows: Map<string, string>; snaps: Map<string, string> }> {
+  const rows = new Map<string, string>();
+  const snaps = new Map<string, string>();
+  if (!days.length) return { rows, snaps };
+  const snapDays = new Set<string>();
+  for (const day of days) {
+    snapDays.add(day);
+    snapDays.add(addDays(day, 1));
+  }
+  const rowPh = days.map(() => "?").join(",");
+  const snapList = [...snapDays];
+  const snapPh = snapList.map(() => "?").join(",");
+  const rowMarker = isPostgresUrl() ? "0" : "MAX(r.rowid)";
+  const rowStats = (await dbAll(
+    `SELECT r.bill_day AS day, COUNT(*) AS n, ${rowMarker} AS marker, COALESCE(SUM(r.consumption), 0) AS total
+     FROM billing_rows r JOIN channels c ON c.id = r.channel_id
+     WHERE c.created_here = 1 AND r.bill_day IN (${rowPh}) ${scope}
+     GROUP BY r.bill_day`,
+    [...days, ...scopeParams],
+  )) as Row[];
+  const snapStats = (await dbAll(
+    `SELECT s.day AS day, COUNT(*) AS n, COALESCE(MAX(s.pulled_at), 0) AS marker, COALESCE(SUM(s.amount), 0) AS total
+     FROM billing_snapshots s JOIN channels c ON c.id = s.channel_id
+     WHERE s.source_id = 'customer_billing' AND c.created_here = 1 AND s.day IN (${snapPh}) ${scope}
+     GROUP BY s.day`,
+    [...snapList, ...scopeParams],
+  )) as Row[];
+  for (const row of rowStats) rows.set(String(row.day), dayMark(row));
+  for (const row of snapStats) snaps.set(String(row.day), dayMark(row));
+  return { rows, snaps };
+}
+
+function trendVersion(day: string, versions: { rows: Map<string, string>; snaps: Map<string, string> }, membershipCount: number): string {
+  const row = versions.rows.get(day) ?? "0|0|0";
+  const snap = versions.snaps.get(day) ?? "0|0|0";
+  const next = versions.snaps.get(addDays(day, 1)) ?? "0|0|0";
+  return `r${row}|s${snap}|n${next}|m${membershipCount}`;
 }
 
 function dropPublishedDay(day: string): void {
@@ -1063,13 +1121,15 @@ export async function billingView(actor: SessionUser, options: BillingViewOption
   const trendDays = allDays.slice(-TREND_WINDOW_DAYS);
   const daysNeeded = new Set(trendDays);
   if (billDay) daysNeeded.add(billDay);
+  const versions = await loadWindowVersions([...daysNeeded], scope, scopeParams);
   const assembled = new Map<string, DayAssembly | CachedDay>();
   const misses: string[] = [];
   for (const day of [...daysNeeded].sort()) {
     const run = runFor(day);
     const published = Boolean(run && String(run.status) === "published");
+    const version = trendVersion(day, versions, rolesByDay.get(day)?.size ?? 0);
     const hit = published && day !== billDay
-      ? publishedDayCache.get(publishedCacheKey(day, run?.aggregation, scope, scopeParams))
+      ? publishedDayCache.get(publishedCacheKey(day, run?.aggregation, scope, scopeParams, version))
       : undefined;
     if (hit) assembled.set(day, hit);
     else misses.push(day);
@@ -1080,7 +1140,8 @@ export async function billingView(actor: SessionUser, options: BillingViewOption
     const assembly = await assembleDay(day, scope, scopeParams, run, rolesByDay.get(day) ?? null, supplier);
     assembled.set(day, assembly);
     if (run && String(run.status) === "published") {
-      publishedDayCache.set(publishedCacheKey(day, run.aggregation, scope, scopeParams), {
+      const version = trendVersion(day, versions, rolesByDay.get(day)?.size ?? 0);
+      publishedDayCache.set(publishedCacheKey(day, run.aggregation, scope, scopeParams, version), {
         cached: true,
         legacy: assembly.legacy,
         unpublished: assembly.unpublished,

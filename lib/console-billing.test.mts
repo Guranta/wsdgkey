@@ -1465,3 +1465,101 @@ test("the chart computes at most 30 days", async () => {
   assert.equal(oldest.trend.length, 30);
   assert.equal(oldest.trend.some((item) => item.day === days[0]), false);
 });
+
+test("a later snapshot for d+1 changes the cached trend and the bill total together", async () => {
+  const { dbRun } = await freshDb();
+  const { authenticate } = await import("./users.ts");
+  const { billingView } = await import("./billing-service.ts");
+  const admin = await authenticate("admin", "admin-pass-123");
+  if (typeof admin !== "object") throw new Error("admin");
+  const now = Date.now();
+  await dbRun(
+    `INSERT INTO gateways (id, name, base_url, token_cipher, admin_user_id, demo, created_at, updated_at, disabled, kind)
+     VALUES ('snap-gw', 'supplier', 'https://snap-cache.example', '', '1', 0, ?, ?, 0, 'newapi_supplier')`,
+    [now, now],
+  );
+  await dbRun(
+    `INSERT INTO channels (
+      id, gateway_id, upstream_id, creator_user_id, name, type, group_name, status, created_at, updated_at, created_here
+    ) VALUES ('snap-ch', 'snap-gw', 1, ?, 'snap', 1, 'pool', 1, ?, ?, 1)`,
+    [admin.id, now, now],
+  );
+  await dbRun(
+    `INSERT INTO billing_snapshots (channel_id, day, source_id, quality, amount, unit, pulled_at)
+     VALUES ('snap-ch', '2026-11-08', 'customer_billing', 'ok', 0, 'usd', ?)`,
+    [now],
+  );
+  await dbRun(
+    `INSERT INTO billing_runs (baseline_day, bill_day, status, started_at, published_at)
+     VALUES ('2026-11-09', '2026-11-08', 'published', ?, ?),
+            ('2026-11-10', '2026-11-09', 'published', ?, ?)`,
+    [now, now, now, now],
+  );
+  const cached = await billingView(admin, { day: "2026-11-09" });
+  const before = cached.trend.find((item) => item.day === "2026-11-08");
+  assert.ok(before);
+  assert.equal(before.missing, true);
+  assert.equal(before.value, null);
+  await dbRun(
+    `INSERT INTO billing_snapshots (channel_id, day, source_id, quality, amount, unit, pulled_at)
+     VALUES ('snap-ch', '2026-11-09', 'customer_billing', 'ok', 2, 'usd', ?)`,
+    [now + 1],
+  );
+  const again = await billingView(admin, { day: "2026-11-09" });
+  const point = again.trend.find((item) => item.day === "2026-11-08");
+  const opened = await billingView(admin, { day: "2026-11-08" });
+  const table = columnSummary(opened.rows.map((row) => row.today));
+  assert.ok(point);
+  assert.equal(point.missing, false);
+  assert.equal(point.value, 2 * 500_000);
+  assert.notEqual(point.value, before.value);
+  assert.equal(table.value, point.value);
+  assert.equal(table.missing, point.missing);
+  assert.equal(opened.trend.find((item) => item.day === "2026-11-08")?.value, table.value);
+});
+
+test("a billing_rows rewrite for a published day changes the cached trend and the bill total together", async () => {
+  const { dbRun } = await freshDb();
+  const { authenticate } = await import("./users.ts");
+  const { billingView } = await import("./billing-service.ts");
+  const admin = await authenticate("admin", "admin-pass-123");
+  if (typeof admin !== "object") throw new Error("admin");
+  const now = Date.now();
+  await dbRun(
+    `INSERT INTO gateways (id, name, base_url, token_cipher, admin_user_id, demo, created_at, updated_at, disabled)
+     VALUES ('row-gw', 'admin', 'https://row-cache.example', '', '1', 0, ?, ?, 0)`,
+    [now, now],
+  );
+  await dbRun(
+    `INSERT INTO channels (
+      id, gateway_id, upstream_id, creator_user_id, name, type, group_name, status, created_at, updated_at, created_here
+    ) VALUES ('row-ch', 'row-gw', 1, ?, 'row', 1, 'pool', 1, ?, ?, 1)`,
+    [admin.id, now, now],
+  );
+  await dbRun(
+    `INSERT INTO billing_rows (id, bill_day, channel_id, start_day, end_day, span_days, kind, consumption)
+     VALUES ('2026-11-10:row-ch', '2026-11-10', 'row-ch', '2026-11-10', '2026-11-10', 1, 'amount', 100),
+            ('2026-11-11:row-ch', '2026-11-11', 'row-ch', '2026-11-11', '2026-11-11', 1, 'amount', 5)`,
+  );
+  await dbRun(
+    `INSERT INTO billing_runs (baseline_day, bill_day, status, started_at, published_at, aggregation)
+     VALUES ('2026-11-11', '2026-11-10', 'published', ?, ?, 'dedup'),
+            ('2026-11-12', '2026-11-11', 'published', ?, ?, 'dedup')`,
+    [now, now, now, now],
+  );
+  await dbRun("INSERT INTO billing_membership (bill_day, channel_id, role) VALUES ('2026-11-10', 'row-ch', 'counted'), ('2026-11-11', 'row-ch', 'counted')");
+  const cached = await billingView(admin, { day: "2026-11-11" });
+  const before = cached.trend.find((item) => item.day === "2026-11-10");
+  assert.ok(before);
+  assert.equal(before.value, 100);
+  await dbRun("UPDATE billing_rows SET consumption = 250 WHERE bill_day = '2026-11-10' AND channel_id = 'row-ch'");
+  const again = await billingView(admin, { day: "2026-11-11" });
+  const point = again.trend.find((item) => item.day === "2026-11-10");
+  const opened = await billingView(admin, { day: "2026-11-10" });
+  assert.ok(point);
+  assert.equal(point.value, 250);
+  assert.notEqual(point.value, before.value);
+  assert.equal(opened.totalConsumption, 250);
+  assert.equal(opened.trend.find((item) => item.day === "2026-11-10")?.value, opened.totalConsumption);
+  assert.equal(point.value, opened.totalConsumption);
+});
