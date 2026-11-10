@@ -2,6 +2,7 @@
 
 import { useConnections } from "@/components/providers";
 import { BRAND_NAME } from "@/lib/brand";
+import { formatTimestamp } from "@/lib/format";
 import { gatewayCardCopy, settingsIntroKey } from "@/lib/gateway-card";
 import { suggestSellerGatewayName } from "@/lib/seller-name";
 import { formatShanghaiTime } from "@/lib/shanghai";
@@ -26,6 +27,8 @@ type Gateway = {
   authError?: string;
   authCheckedAt?: number | null;
   accessExpiresAt?: number | null;
+  listSyncStatus?: string;
+  listSyncAt?: number | null;
 };
 type Limits = { siteName: string; gatewayPerMin: number; channelPerMin: number; concurrency: number; testCooldownMin: number; quotaPerUnit: number; reconTolerancePct: number; zeroDays: number; manualTolerancePct: number };
 type Draft = { id: string; kind: "newapi_admin" | "newapi_seller" | "newapi_supplier"; name: string; baseUrl: string; adminUserId: string; token: string; username: string; password: string; nameTouched: boolean };
@@ -276,6 +279,9 @@ export function SettingsView() {
                       {" · "}
                       {t("channelCount", { count: item.channelCount ?? 0 })}
                     </div>
+                    {copy.fetchFailed ? (
+                      <div className="mt-1 text-xs font-medium text-secondary">{t("fetchFailedAt", { when: formatTimestamp(item.listSyncAt || item.authCheckedAt, locale) })}</div>
+                    ) : null}
                   </div>
                   <span title={copy.reloginTip ? t("supplierReloginTip") : undefined} className={`whitespace-nowrap rounded-full px-2 py-0.5 text-xs ${toneClass[copy.tone]}`}>
                     {pill}

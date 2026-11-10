@@ -1,6 +1,7 @@
 import { dbRun } from "./db";
 import type { GatewaySecret } from "./gateways";
 import { saveSellerCapabilities } from "./gateways";
+import { httpStatusOf, logListPage, readExplicitTotal } from "./list-sweep";
 import { sellerChannelBody, readSellerCapabilities, type SellerCapabilities } from "./seller-payload";
 import { sellerRequest } from "./seller-auth";
 import { upstreamQueue } from "./rate-queue";
@@ -21,7 +22,9 @@ import {
 
 export type ChannelPage = {
   items: UpstreamChannel[];
-  total: number;
+  /** Explicit finite total from upstream. Null when the field is missing or not a finite integer. */
+  total: number | null;
+  status: number;
   capabilities: SellerCapabilities | null;
 };
 
@@ -57,12 +60,29 @@ function queued<T>(gateway: GatewaySecret, lane: string, run: () => Promise<T>, 
   });
 }
 
+async function loadListedPage(
+  gateway: GatewaySecret,
+  page: number,
+  load: () => Promise<{ items: UpstreamChannel[]; total: number | null; capabilities: SellerCapabilities | null }>,
+): Promise<ChannelPage> {
+  try {
+    const listed = await load();
+    logListPage(gateway.id, page, 200, listed.total, listed.items.length);
+    return { ...listed, status: 200 };
+  } catch (error) {
+    logListPage(gateway.id, page, httpStatusOf(error), null, 0);
+    throw error;
+  }
+}
+
 function adminApi(gateway: GatewaySecret): GatewayApi {
   return {
     kind: "newapi_admin",
     async list(page) {
-      const listed = await listUpstreamChannels(gateway, page);
-      return { items: listed.items, total: listed.total, capabilities: null };
+      return loadListedPage(gateway, page, async () => {
+        const listed = await listUpstreamChannels(gateway, page);
+        return { items: listed.items, total: listed.total, capabilities: null };
+      });
     },
     get: (id) => fetchUpstreamChannel(gateway, id),
     create: (payload) => addUpstreamChannel(gateway, payload),
@@ -82,16 +102,18 @@ function sellerApi(gateway: GatewaySecret): GatewayApi {
   return {
     kind: "newapi_seller",
     async list(page) {
-      const body = await queued(gateway, "list", () =>
-        sellerCall<{ data?: { items?: unknown[]; total?: number } }>(
-          gateway,
-          `/api/seller/channel/?p=${page}&page_size=20&id_sort=true`,
-        ),
-      );
-      const items = Array.isArray(body.data?.items) ? body.data.items.map(parseChannel).filter((item): item is UpstreamChannel => Boolean(item)) : [];
-      const capabilities = readSellerCapabilities(body.data);
-      if (capabilities) await saveSellerCapabilities(gateway.id, capabilities);
-      return { items, total: Number(body.data?.total ?? items.length), capabilities };
+      return loadListedPage(gateway, page, async () => {
+        const body = await queued(gateway, "list", () =>
+          sellerCall<{ data?: { items?: unknown[]; total?: number } }>(
+            gateway,
+            `/api/seller/channel/?p=${page}&page_size=20&id_sort=true`,
+          ),
+        );
+        const items = Array.isArray(body.data?.items) ? body.data.items.map(parseChannel).filter((item): item is UpstreamChannel => Boolean(item)) : [];
+        const capabilities = readSellerCapabilities(body.data);
+        if (capabilities) await saveSellerCapabilities(gateway.id, capabilities);
+        return { items, total: readExplicitTotal(body.data?.total), capabilities };
+      });
     },
     async get(id) {
       const body = await queued(gateway, `channel:${id}`, () => sellerCall<{ data?: unknown }>(gateway, `/api/seller/channel/${id}`));
@@ -170,11 +192,13 @@ function supplierApi(gateway: GatewaySecret): GatewayApi {
   return {
     kind: "newapi_supplier",
     async list(page) {
-      const body = await queued(gateway, "list", () =>
-        sellerCall<{ data?: { items?: unknown[]; total?: number } }>(gateway, `/api/channel/?p=${page}&page_size=20&id_sort=true`),
-      );
-      const items = Array.isArray(body.data?.items) ? body.data.items.map(parseChannel).filter((item): item is UpstreamChannel => Boolean(item)) : [];
-      return { items, total: Number(body.data?.total ?? items.length), capabilities: null };
+      return loadListedPage(gateway, page, async () => {
+        const body = await queued(gateway, "list", () =>
+          sellerCall<{ data?: { items?: unknown[]; total?: number } }>(gateway, `/api/channel/?p=${page}&page_size=20&id_sort=true`),
+        );
+        const items = Array.isArray(body.data?.items) ? body.data.items.map(parseChannel).filter((item): item is UpstreamChannel => Boolean(item)) : [];
+        return { items, total: readExplicitTotal(body.data?.total), capabilities: null };
+      });
     },
     async get(id) {
       const body = await queued(gateway, `channel:${id}`, () => sellerCall<{ data?: unknown }>(gateway, `/api/channel/${id}`));

@@ -11,6 +11,7 @@ import { addDays, formatShanghaiTime, logWindow, shanghaiClock, shanghaiMidnight
 import { scopeOwnerId } from "./scope";
 import type { SessionUser } from "./types";
 import { gatewayApi } from "./gateway-adapter";
+import { judgeListPage } from "./list-sweep";
 import { fetchUpstreamChannel, testLogQuota, todayQuota, UpstreamFailure } from "./upstream";
 
 type Row = Record<string, unknown>;
@@ -54,18 +55,28 @@ async function pullSellerBaseline(
   try {
     const api = gatewayApi(gateway);
     let remote: { usedQuota: number; balance: number | null } | null = null;
-    let total = 0;
-    for (let page = 1; page <= 50; page += 1) {
+    let agreed: number | null = null;
+    const seen = new Set<number>();
+    let aborted = false;
+    for (let page = 1; page <= 2000; page += 1) {
       const listed = await api.list(page);
-      total = listed.total;
       const found = listed.items.find((item) => item.id === upstreamId);
+      for (const item of listed.items) seen.add(item.id);
       if (found) {
         remote = found;
         break;
       }
-      if (page * 20 >= total) break;
+      const step = judgeListPage({ explicitTotal: listed.total, agreedTotal: agreed, itemCount: listed.items.length, uniqueIds: seen.size });
+      agreed = step.agreedTotal;
+      if (step.verdict === "abort") {
+        aborted = true;
+        break;
+      }
+      if (step.verdict === "complete") break;
+      if (page === 2000) aborted = true;
     }
     if (!remote) {
+      if (aborted) throw new UpstreamFailure("incompleteList", true);
       await markMissing(channelId);
       throw new UpstreamFailure("missing", false);
     }
@@ -587,6 +598,7 @@ export async function billingView(actor: SessionUser, options: BillingViewOption
     publishedLabel: formatShanghaiTime(showing?.published_at ? Number(showing.published_at) : null),
     billDay,
     unsyncedCount: unsynced.length,
+    incomplete: unsynced.length > 0,
     totalConsumption: counted.reduce((sum, row) => sum + Number(row.consumption ?? 0), 0),
     totalTestQuota: merged.reduce((sum, row) => sum + Number(row.test_quota ?? 0), 0),
     showTestLine: rows.some((row) => String(row.billing_mode ?? "") !== "snapshot"),

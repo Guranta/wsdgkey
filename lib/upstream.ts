@@ -1,4 +1,5 @@
 import type { GatewaySecret } from "./gateways";
+import { readExplicitTotal } from "./list-sweep";
 import type { Retryable } from "./rate-queue";
 import { upstreamQueue } from "./rate-queue";
 
@@ -42,10 +43,12 @@ export type UpstreamChannel = {
 export class UpstreamFailure extends Error {
   retryable: boolean;
   retryAfter: number | null;
-  constructor(message: string, retryable: boolean, retryAfter: number | null = null) {
+  status: number;
+  constructor(message: string, retryable: boolean, retryAfter: number | null = null, status = 0) {
     super(message);
     this.retryable = retryable;
     this.retryAfter = retryAfter;
+    this.status = status;
   }
 }
 
@@ -84,13 +87,13 @@ async function requestJson(gateway: GatewaySecret, path: string, init: RequestIn
   } catch (error) {
     const aborted = error instanceof Error && error.name === "AbortError";
     console.info(`upstream ${aborted ? "timeout" : "network"} ${url.pathname}`);
-    throw new UpstreamFailure(aborted ? "上游超时" : "无法连接网关", true);
+    throw new UpstreamFailure(aborted ? "上游超时" : "无法连接网关", true, null, 0);
   } finally {
     clearTimeout(timer);
   }
   console.info(`upstream ${response.status} ${url.pathname}`);
   if (response.status >= 300 && response.status < 400) {
-    throw new UpstreamFailure("网关返回了重定向", false);
+    throw new UpstreamFailure("网关返回了重定向", false, null, response.status);
   }
   const text = await response.text();
   let body: unknown = null;
@@ -102,14 +105,14 @@ async function requestJson(gateway: GatewaySecret, path: string, init: RequestIn
     }
   }
   if (response.status === 429 || response.status >= 500) {
-    throw new UpstreamFailure("网关繁忙", true, retryAfterSeconds(response.headers.get("retry-after")));
+    throw new UpstreamFailure("网关繁忙", true, retryAfterSeconds(response.headers.get("retry-after")), response.status);
   }
   if (!response.ok) {
     const message = messageOf(body) || "网关拒绝了请求";
-    throw new UpstreamFailure(message, false);
+    throw new UpstreamFailure(message, false, null, response.status);
   }
   const success = body && typeof body === "object" && "success" in body ? (body as { success?: boolean }).success : true;
-  if (success === false) throw new UpstreamFailure(messageOf(body) || "网关返回失败", false);
+  if (success === false) throw new UpstreamFailure(messageOf(body) || "网关返回失败", false, null, response.status);
   return body;
 }
 
@@ -215,14 +218,14 @@ function epochMs(raw: unknown): number | null {
 
 type ListBody = { data?: { items?: unknown[]; total?: number } };
 
-export async function listUpstreamChannels(gateway: GatewaySecret, page: number): Promise<{ items: UpstreamChannel[]; total: number }> {
+export async function listUpstreamChannels(gateway: GatewaySecret, page: number): Promise<{ items: UpstreamChannel[]; total: number | null }> {
   const body = await callGateway<ListBody>(
     gateway,
     "list",
     `/api/channel/?p=${page}&page_size=20&id_sort=true&tag_mode=false`,
   );
   const items = Array.isArray(body.data?.items) ? body.data.items.map(parseChannel).filter((item): item is UpstreamChannel => Boolean(item)) : [];
-  return { items, total: Number(body.data?.total ?? items.length) };
+  return { items, total: readExplicitTotal(body.data?.total) };
 }
 
 export async function consumeQuota(

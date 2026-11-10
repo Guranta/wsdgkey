@@ -514,6 +514,11 @@ export async function ensureReady(): Promise<void> {
       )`);
       await addMissingColumns(db, "recon_rows", [["binding_id", "TEXT"]]);
       await addMissingColumns(db, "gateways", [
+        ["list_sync_status", "TEXT NOT NULL DEFAULT ''"],
+        ["list_sync_error", "TEXT NOT NULL DEFAULT ''"],
+        ["list_sync_at", "INTEGER"],
+      ]);
+      await addMissingColumns(db, "gateways", [
         ["disabled", "INTEGER NOT NULL DEFAULT 0"],
         ["kind", "TEXT NOT NULL DEFAULT 'newapi_admin'"],
         ["username", "TEXT NOT NULL DEFAULT ''"],

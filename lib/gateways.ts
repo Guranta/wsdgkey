@@ -29,6 +29,9 @@ export type GatewayPublic = {
   authError: string;
   authCheckedAt: number | null;
   accessExpiresAt: number | null;
+  listSyncStatus: string;
+  listSyncError: string;
+  listSyncAt: number | null;
   ownerUserId: string | null;
   canWrite: boolean;
   canToggle: boolean;
@@ -58,6 +61,9 @@ type GatewayRow = {
   auth_error?: string;
   auth_checked_at?: number | null;
   access_expires_at?: number | null;
+  list_sync_status?: string | null;
+  list_sync_error?: string | null;
+  list_sync_at?: number | null;
   owner_user_id?: string | null;
   can_write?: number;
   can_toggle?: number;
@@ -92,6 +98,9 @@ function present(row: GatewayRow): GatewayPublic {
     authError: String(row.auth_error ?? ""),
     authCheckedAt: row.auth_checked_at ? Number(row.auth_checked_at) : null,
     accessExpiresAt: row.access_expires_at ? Number(row.access_expires_at) : null,
+    listSyncStatus: String(row.list_sync_status ?? ""),
+    listSyncError: String(row.list_sync_error ?? ""),
+    listSyncAt: row.list_sync_at ? Number(row.list_sync_at) : null,
     ownerUserId: row.owner_user_id ? String(row.owner_user_id) : null,
     canWrite: Number(row.can_write ?? 1) !== 0,
     canToggle: Number(row.can_toggle ?? 1) !== 0,
@@ -131,6 +140,9 @@ export function publicGateway(gateway: GatewaySecret): GatewayPublic {
     authError: gateway.authError ?? "",
     authCheckedAt: gateway.authCheckedAt ?? null,
     accessExpiresAt: gateway.accessExpiresAt ?? null,
+    listSyncStatus: gateway.listSyncStatus ?? "",
+    listSyncError: gateway.listSyncError ?? "",
+    listSyncAt: gateway.listSyncAt ?? null,
     ownerUserId: gateway.ownerUserId ?? null,
     canWrite: gateway.canWrite !== false,
     canToggle: gateway.canToggle !== false,

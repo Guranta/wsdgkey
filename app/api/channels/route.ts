@@ -25,6 +25,8 @@ export async function GET(req: Request) {
     authError: item.authError,
     authCheckedAt: item.authCheckedAt,
     accessExpiresAt: item.accessExpiresAt,
+    listSyncStatus: item.listSyncStatus,
+    listSyncAt: item.listSyncAt,
   }));
   return Response.json({ ...result, gateways }, { headers: { "cache-control": "no-store" } });
 }
