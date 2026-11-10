@@ -17,6 +17,37 @@ process.env.DEMO_GATEWAY = "0";
 const parentActor = { id: "parent", parentUserId: null };
 const childActor = { id: "child", parentUserId: "parent" };
 
+test("a sub-account inherits the parent supplier gateway list", async () => {
+  const { gatewayVisibleTo } = await import("./gateways.ts");
+  const parent = { id: "parent", role: "supplier" as const, parentUserId: null };
+  const child = { id: "child", role: "supplier" as const, parentUserId: "parent" };
+  const other = { id: "other", role: "supplier" as const, parentUserId: null };
+  const gateways = [
+    { id: "shared-admin", kind: "newapi_admin", ownerUserId: "admin" },
+    { id: "jwt-owned-by-admin", kind: "newapi_supplier", ownerUserId: "admin" },
+    { id: "jwt-owned-by-other", kind: "newapi_supplier", ownerUserId: "other" },
+    { id: "seller-parent", kind: "newapi_seller", ownerUserId: "parent" },
+    { id: "seller-other", kind: "newapi_seller", ownerUserId: "other" },
+  ];
+  const see = (actor: typeof parent) => gateways.filter((item) => gatewayVisibleTo(actor, item)).map((item) => item.id);
+  assert.deepEqual(see(child), see(parent));
+  assert.deepEqual(see(parent), ["shared-admin", "jwt-owned-by-admin", "jwt-owned-by-other", "seller-parent"]);
+  assert.equal(see(child).includes("jwt-owned-by-admin"), true);
+  assert.equal(see(child).includes("seller-other"), false);
+  assert.equal(see(other).includes("seller-parent"), false);
+});
+
+test("sub-account list and gateway management stay forbidden", () => {
+  const gateways = readFileSync(new URL("../app/api/gateways/route.ts", import.meta.url), "utf8");
+  const subs = readFileSync(new URL("../app/api/sub-accounts/route.ts", import.meta.url), "utf8");
+  const channels = readFileSync(new URL("../components/channels-view.tsx", import.meta.url), "utf8");
+  assert.match(gateways, /if \(user\.parentUserId\) return apiError\("forbidden", 403\)/);
+  assert.match(subs, /listSubAccounts\(user/);
+  assert.equal(channels.includes("parentUserId"), false);
+  assert.match(channels, /sellerGateway \|\| supplierGateway/);
+  assert.match(channels, /importExisting/);
+});
+
 test("channel ownership stays with the parent supplier", () => {
   assert.equal(channelCreatorId(parentActor, null), "parent");
   assert.equal(channelCreatorId(childActor, null), "parent");
@@ -110,7 +141,10 @@ test("parent, sub-account, and admin permissions", async () => {
   const everyone = await listSubAccounts(admin);
   assert.equal(everyone.length, 3);
   assert.equal((await listSubAccounts(parent)).some((item) => item.id === otherSub.id), false);
-  await assert.rejects(() => listSubAccounts(resigned), (error: Error) => error.message === "forbidden");
+  await assert.rejects(
+    () => listSubAccounts(resigned),
+    (error: Error & { status?: number }) => error.message === "forbidden" && error.status === 403,
+  );
   await assert.rejects(() => updateSubAccount(resigned, adminMade.id, { disabled: true }), (error: Error) => error.message === "subAccountNested");
   await assert.rejects(() => updateSubAccount(other, created.id, { disabled: true }), (error: Error) => error.message === "forbidden");
 
@@ -127,6 +161,7 @@ test("parent, sub-account, and admin permissions", async () => {
     ["gw-other-seller", "newapi_seller", other.id],
     ["gw-parent-jwt", "newapi_supplier", parent.id],
     ["gw-other-jwt", "newapi_supplier", other.id],
+    ["gw-admin-jwt", "newapi_supplier", admin.id],
   ];
   for (const [id, kind, owner] of gateways) {
     await dbRun(
@@ -135,11 +170,12 @@ test("parent, sub-account, and admin permissions", async () => {
       [id, id, now, now, kind, owner],
     );
   }
-  const visible = (await listVisibleGateways(resigned)).map((item) => item.id).sort();
-  assert.deepEqual(visible, ["gw-admin", "gw-parent-jwt", "gw-parent-seller"]);
-  const parentVisible = (await listVisibleGateways(parent)).map((item) => item.id);
-  assert.equal(parentVisible.includes("gw-parent-seller"), true);
-  assert.equal(parentVisible.includes("gw-other-seller"), false);
+  const childVisible = (await listVisibleGateways(resigned)).map((item) => item.id).sort();
+  const parentVisible = (await listVisibleGateways(parent)).map((item) => item.id).sort();
+  assert.deepEqual(childVisible, parentVisible);
+  assert.equal(childVisible.includes("gw-admin-jwt"), true);
+  assert.equal(childVisible.includes("gw-parent-seller"), true);
+  assert.equal(childVisible.includes("gw-other-seller"), false);
 
   async function channel(id: string, gatewayId: string, creator: string, name: string, owned: number | null, upstream: number) {
     await dbRun(
@@ -166,8 +202,8 @@ test("parent, sub-account, and admin permissions", async () => {
   await assert.rejects(() => updateChannel(parent, "ch-imported", {}), (error: Error) => error.message === "supplierNotOwned");
   await assert.rejects(() => updateChannel(resigned, "ch-owned", {}), (error: Error) => error.message === "channelNameRequired");
   await assert.rejects(() => updateChannel(other, "ch-owned", {}), (error: Error) => error.message === "notFound");
-  await assert.rejects(() => createChannels(resigned, { gatewayId: "gw-other-jwt" }), (error: Error) => error.message === "gatewayMissing");
   await assert.rejects(() => createChannels(resigned, { gatewayId: "gw-other-seller" }), (error: Error) => error.message === "gatewayMissing");
+  await assert.rejects(() => createChannels(parent, { gatewayId: "gw-other-seller" }), (error: Error) => error.message === "gatewayMissing");
   await assert.rejects(() => importSellerChannels(resigned, "gw-other-seller"), (error: Error) => error.message === "gatewayMissing");
   await assert.rejects(() => importSellerChannels(other, "gw-parent-seller"), (error: Error) => error.message === "gatewayMissing");
 

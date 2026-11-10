@@ -377,13 +377,14 @@ export async function renewalAlertsFor(actor: SessionUser): Promise<{ id: string
   }));
 }
 
-export function gatewayVisibleTo(actor: SessionUser, gateway: { kind: GatewayKind; ownerUserId: string | null }): boolean {
+/** Same gateway list a parent supplier sees. A sub-account uses the parent id in that check. */
+export function gatewayVisibleTo(
+  actor: Pick<SessionUser, "role" | "id" | "parentUserId">,
+  gateway: { kind: string; ownerUserId: string | null },
+): boolean {
   if (actor.role === "admin") return true;
-  if (actor.parentUserId) {
-    if (gateway.kind === "newapi_admin") return true;
-    return gateway.ownerUserId === actor.parentUserId;
-  }
-  return gateway.kind !== "newapi_seller" || gateway.ownerUserId === actor.id;
+  const ownerId = actor.parentUserId || actor.id;
+  return gateway.kind !== "newapi_seller" || gateway.ownerUserId === ownerId;
 }
 
 export async function listVisibleGateways(actor: SessionUser): Promise<GatewayPublic[]> {
