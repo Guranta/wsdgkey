@@ -705,25 +705,61 @@ function publishedCacheKey(day: string, aggregation: unknown, scope: string, sco
   return `${day}|${String(aggregation ?? "")}|${scope}|${scopeParams.map((item) => String(item)).join(",")}|${version}`;
 }
 
-function dayMark(row: Row | undefined): string {
-  if (!row) return "0|0|0";
-  return `${Number(row.n) || 0}|${Number(row.marker) || 0}|${Number(row.total) || 0}`;
+function versionNum(value: unknown): number {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : 0;
 }
+
+/** A sum treats null and 0 alike. present is COUNT(column), which counts only non-null values. */
+function rowMark(row: Row | undefined): string {
+  const parts = row
+    ? [row.n, row.marker, row.total, row.present, row.amount_n, row.unsynced_n, row.nobase_n, row.other_n]
+    : [0, 0, 0, 0, 0, 0, 0, 0];
+  return parts.map(versionNum).join("|");
+}
+
+type SnapColumns = { quality: boolean; fxRate: boolean };
+
+let snapColumns: SnapColumns | null = null;
+
+async function snapshotVersionColumns(): Promise<SnapColumns> {
+  if (snapColumns) return snapColumns;
+  const found = isPostgresUrl()
+    ? await dbAll("SELECT column_name AS name FROM information_schema.columns WHERE table_name = ?", ["billing_snapshots"])
+    : await dbAll("PRAGMA table_info(billing_snapshots)");
+  const names = new Set(found.map((row) => String(row.name ?? "")));
+  snapColumns = { quality: names.has("quality"), fxRate: names.has("fx_rate") };
+  return snapColumns;
+}
+
+function snapMark(row: Row | undefined, columns: SnapColumns): string {
+  const base = (row ? [row.n, row.marker, row.total, row.present] : [0, 0, 0, 0]).map(versionNum).join("|");
+  const quality = columns.quality
+    ? `|${(row ? [row.ok_n, row.missing_n, row.stale_n, row.unavailable_n, row.other_n] : [0, 0, 0, 0, 0]).map(versionNum).join("|")}`
+    : "";
+  const fx = columns.fxRate ? `|${versionNum(row?.fx)}` : "";
+  return `${base}${quality}${fx}`;
+}
+
+type WindowVersions = {
+  rows: Map<string, string>;
+  snaps: Map<string, string>;
+  rowEmpty: string;
+  snapEmpty: string;
+};
 
 /**
  * One grouped read for billing_rows and one for billing_snapshots, covering the chart window.
  * billing_rows has no updated_at. count and max(rowid) catch inserts and deletes; the consumption
- * sum catches a rewrite of an existing row, which keeps the same rowid.
- * A bill day d depends on snapshots for d and d+1.
+ * sum catches a rewrite that keeps the same rowid. COUNT(consumption) separates a missing value
+ * from a real 0, and the kind tallies (including SUM(kind = 'amount')) catch a kind change.
+ * A bill day d depends on snapshots for d and d+1. COUNT(amount) separates null from 0 there.
+ * Quality tallies include the ok count. fx_rate is summed only when that column exists.
  */
-async function loadWindowVersions(
-  days: string[],
-  scope: string,
-  scopeParams: unknown[],
-): Promise<{ rows: Map<string, string>; snaps: Map<string, string> }> {
-  const rows = new Map<string, string>();
-  const snaps = new Map<string, string>();
-  if (!days.length) return { rows, snaps };
+async function loadWindowVersions(days: string[], scope: string, scopeParams: unknown[]): Promise<WindowVersions> {
+  const columns = await snapshotVersionColumns();
+  const empty: WindowVersions = { rows: new Map(), snaps: new Map(), rowEmpty: rowMark(undefined), snapEmpty: snapMark(undefined, columns) };
+  if (!days.length) return empty;
   const snapDays = new Set<string>();
   for (const day of days) {
     snapDays.add(day);
@@ -733,29 +769,45 @@ async function loadWindowVersions(
   const snapList = [...snapDays];
   const snapPh = snapList.map(() => "?").join(",");
   const rowMarker = isPostgresUrl() ? "0" : "MAX(r.rowid)";
+  const qualitySql = columns.quality
+    ? `, SUM(CASE WHEN s.quality = 'ok' THEN 1 ELSE 0 END) AS ok_n,
+       SUM(CASE WHEN s.quality = 'missing' THEN 1 ELSE 0 END) AS missing_n,
+       SUM(CASE WHEN s.quality = 'stale' THEN 1 ELSE 0 END) AS stale_n,
+       SUM(CASE WHEN s.quality = 'unavailable' THEN 1 ELSE 0 END) AS unavailable_n,
+       SUM(CASE WHEN s.quality NOT IN ('ok', 'missing', 'stale', 'unavailable') THEN 1 ELSE 0 END) AS other_n`
+    : "";
+  const fxSql = columns.fxRate ? ", COALESCE(SUM(s.fx_rate), 0) AS fx" : "";
   const rowStats = (await dbAll(
-    `SELECT r.bill_day AS day, COUNT(*) AS n, ${rowMarker} AS marker, COALESCE(SUM(r.consumption), 0) AS total
+    `SELECT r.bill_day AS day, COUNT(*) AS n, ${rowMarker} AS marker, COALESCE(SUM(r.consumption), 0) AS total,
+            COUNT(r.consumption) AS present,
+            SUM(CASE WHEN r.kind = 'amount' THEN 1 ELSE 0 END) AS amount_n,
+            SUM(CASE WHEN r.kind = 'unsynced' THEN 1 ELSE 0 END) AS unsynced_n,
+            SUM(CASE WHEN r.kind = 'no-baseline' THEN 1 ELSE 0 END) AS nobase_n,
+            SUM(CASE WHEN r.kind NOT IN ('amount', 'unsynced', 'no-baseline') THEN 1 ELSE 0 END) AS other_n
      FROM billing_rows r JOIN channels c ON c.id = r.channel_id
      WHERE c.created_here = 1 AND r.bill_day IN (${rowPh}) ${scope}
      GROUP BY r.bill_day`,
     [...days, ...scopeParams],
   )) as Row[];
   const snapStats = (await dbAll(
-    `SELECT s.day AS day, COUNT(*) AS n, COALESCE(MAX(s.pulled_at), 0) AS marker, COALESCE(SUM(s.amount), 0) AS total
+    `SELECT s.day AS day, COUNT(*) AS n, COALESCE(MAX(s.pulled_at), 0) AS marker, COALESCE(SUM(s.amount), 0) AS total,
+            COUNT(s.amount) AS present${qualitySql}${fxSql}
      FROM billing_snapshots s JOIN channels c ON c.id = s.channel_id
      WHERE s.source_id = 'customer_billing' AND c.created_here = 1 AND s.day IN (${snapPh}) ${scope}
      GROUP BY s.day`,
     [...snapList, ...scopeParams],
   )) as Row[];
-  for (const row of rowStats) rows.set(String(row.day), dayMark(row));
-  for (const row of snapStats) snaps.set(String(row.day), dayMark(row));
-  return { rows, snaps };
+  const rows = new Map<string, string>();
+  const snaps = new Map<string, string>();
+  for (const row of rowStats) rows.set(String(row.day), rowMark(row));
+  for (const row of snapStats) snaps.set(String(row.day), snapMark(row, columns));
+  return { rows, snaps, rowEmpty: empty.rowEmpty, snapEmpty: empty.snapEmpty };
 }
 
-function trendVersion(day: string, versions: { rows: Map<string, string>; snaps: Map<string, string> }, membershipCount: number): string {
-  const row = versions.rows.get(day) ?? "0|0|0";
-  const snap = versions.snaps.get(day) ?? "0|0|0";
-  const next = versions.snaps.get(addDays(day, 1)) ?? "0|0|0";
+function trendVersion(day: string, versions: WindowVersions, membershipCount: number): string {
+  const row = versions.rows.get(day) ?? versions.rowEmpty;
+  const snap = versions.snaps.get(day) ?? versions.snapEmpty;
+  const next = versions.snaps.get(addDays(day, 1)) ?? versions.snapEmpty;
   return `r${row}|s${snap}|n${next}|m${membershipCount}`;
 }
 
