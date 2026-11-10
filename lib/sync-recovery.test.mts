@@ -279,7 +279,8 @@ test("a rejected catalog does not mark channels missing, and a verified list sti
     const overview = await queryChannels(admin, new URLSearchParams());
     assert.equal(overview.stats.pullFailed, 1);
     assert.equal(overview.stats.pausedGateways, 1);
-    assert.equal(overview.stats.anomaly, 0);
+    assert.equal(overview.stats.upstreamMissing, 0);
+    assert.equal(overview.stats.anomaly, overview.stats.autoDisabled + overview.stats.pullFailed + overview.stats.upstreamMissing);
   } finally {
     console.info = original;
     server.close();

@@ -7,7 +7,7 @@ import { CHANNEL_ID_SEARCH_CAP, parseChannelKeyword, type ChannelSort } from "@/
 import { formatQuota, formatTimestamp } from "@/lib/format";
 import { formatShanghaiTime } from "@/lib/shanghai";
 import { useLocale, useTranslations } from "next-intl";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 
 type GatewayOption = {
   id: string;
@@ -53,6 +53,7 @@ type ChannelItem = DrawerChannel & {
   autoDisableReason: string;
   createdHere: boolean;
   upstreamMissing: boolean;
+  missingConfirmedAt?: number | null;
   gatewayDisabled?: boolean;
   origin?: "created" | "imported";
 };
@@ -66,6 +67,7 @@ type Stats = {
   anomaly: number;
   autoDisabled: number;
   pullFailed: number;
+  upstreamMissing?: number;
   pausedGateways?: number;
   disabled: number;
   todayQuota: number;
@@ -562,8 +564,14 @@ export function ChannelsView() {
                           {stale ? <div className="mt-1"><span className="inline-flex rounded-full bg-input px-2 py-0.5 text-xs font-medium text-muted">{t("statusNotUpdated")}</span></div> : null}
                           {paused ? <div className="mt-1"><span className="inline-flex rounded-full bg-input px-2 py-0.5 text-xs font-medium text-muted">{t("gatewayPaused")}</span></div> : null}
                           <div className="mt-1 flex items-center gap-1.5 text-xs text-muted">
-                            <span className={`h-1.5 w-1.5 rounded-full ${item.syncStatus === "ok" ? "bg-ok" : "bg-warn"}`} />
-                            {item.lastSyncAt ? t("updatedAgo", { when: formatTimestamp(item.lastSyncAt, locale) }) : t("notSynced")}
+                            <span className={`h-1.5 w-1.5 rounded-full ${item.upstreamMissing ? "bg-warn" : item.syncStatus === "ok" ? "bg-ok" : "bg-warn"}`} />
+                            {item.upstreamMissing
+                              ? item.missingConfirmedAt
+                                ? t("confirmedAt", { when: formatShanghaiTime(item.missingConfirmedAt, locale) })
+                                : t("pendingConfirm")
+                              : item.lastSyncAt
+                                ? t("updatedAgo", { when: formatTimestamp(item.lastSyncAt, locale) })
+                                : t("notSynced")}
                           </div>
                         </td>
                         {user?.role === "admin" ? <td className="whitespace-nowrap px-4 py-3.5 text-[13px] text-secondary">{item.creatorName || t("unknownCreator")}</td> : null}
@@ -762,7 +770,7 @@ function FamilyAvatar({ type, name }: { type: number; name: string }) {
   return <span className="inline-flex h-5 w-5 items-center justify-center rounded-[6px] text-[10px] font-semibold text-white" style={{ background: family.color }} title={name}>{family.letter}</span>;
 }
 
-export function KpiRing({ label, value, ratio, tone, hint }: { label: string; value: string; ratio: number; tone: string; hint: string }) {
+export function KpiRing({ label, value, ratio, tone, hint }: { label: string; value: string; ratio: number; tone: string; hint: ReactNode }) {
   const radius = 16;
   const turn = 2 * Math.PI * radius;
   const filled = turn * Math.max(0, Math.min(1, ratio));
@@ -775,7 +783,7 @@ export function KpiRing({ label, value, ratio, tone, hint }: { label: string; va
       <div className="min-w-0">
         <p className="text-xs text-secondary">{label}</p>
         <p className="truncate text-lg font-semibold tabular-nums">{value}</p>
-        <p className="truncate text-[11px] text-muted">{hint}</p>
+        <p className="text-[11px] leading-4 text-muted">{hint}</p>
       </div>
     </Card>
   );

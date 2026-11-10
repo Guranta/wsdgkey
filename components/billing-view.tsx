@@ -3,11 +3,23 @@
 import { KpiRing, QueueStrip, deltaText, type QueueSnap } from "@/components/channels-view";
 import { useConnections } from "@/components/providers";
 import { Alert, Card, PageHeader, useIsClient } from "@/components/ui";
+import { billingPickerDay, billingRequestQuery, disabledGatewayAmountText } from "@/lib/billing-query";
 import { formatUsd } from "@/lib/format";
 import { useLocale, useTranslations } from "next-intl";
 import { useEffect, useState } from "react";
 
-type OverviewStats = { total: number; running: number; anomaly: number; autoDisabled: number; pullFailed: number; pausedGateways?: number; todayQuota: number; yesterdayQuota: number; queue: QueueSnap };
+type OverviewStats = {
+  total: number;
+  running: number;
+  anomaly: number;
+  autoDisabled: number;
+  pullFailed: number;
+  upstreamMissing?: number;
+  pausedGateways?: number;
+  todayQuota: number;
+  yesterdayQuota: number;
+  queue: QueueSnap;
+};
 
 type Slice = { name: string; value: number };
 type BillRow = {
@@ -39,6 +51,7 @@ type BillRow = {
 type Bill = {
   copy: string;
   requestedDay: string | null;
+  publication?: "latest" | "published" | "unpublished" | "none";
   collecting: boolean;
   progress: { total: number; ok: number; failed: number; etaMinutes?: number };
   suppliers: { id: string; name: string }[];
@@ -47,6 +60,7 @@ type Bill = {
   billDay: string | null;
   unsyncedCount: number;
   incomplete?: boolean;
+  disabledGateway?: { channels: number; consumption: number | null; complete: boolean };
   totalConsumption: number;
   totalTestQuota: number;
   showTestLine?: boolean;
@@ -60,6 +74,102 @@ type Bill = {
   rows: BillRow[];
 };
 export type { Bill, BillRow };
+
+/** Shared by the overview and the bills page. A picked day is the `day` query; an empty pick lets the server choose the latest published day. */
+export function useBillingBill(options: { unsynced?: boolean; supplier?: string; intervalMs: number }) {
+  const hydrated = useIsClient();
+  const errors = useTranslations("errors");
+  const [picked, setPicked] = useState<string | null>(null);
+  const [urlReady, setUrlReady] = useState(false);
+  const [bill, setBill] = useState<Bill | null>(null);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    const fromUrl = new URLSearchParams(window.location.search).get("day")?.trim() ?? "";
+    if (fromUrl) setPicked(fromUrl);
+    setUrlReady(true);
+  }, []);
+
+  const pickerValue = billingPickerDay(picked, bill);
+
+  useEffect(() => {
+    if (!hydrated || !urlReady) return;
+    let cancelled = false;
+    const qs = billingRequestQuery({ day: picked, unsynced: options.unsynced, supplier: options.supplier });
+    const load = () => {
+      void fetch(`/api/billing${qs}`, { cache: "no-store" })
+        .then(async (res) => {
+          if (!res.ok) {
+            if (!cancelled) setError(errors("billingLoadFailed"));
+            return;
+          }
+          if (!cancelled) {
+            setBill((await res.json()) as Bill);
+            setError("");
+          }
+        })
+        .catch(() => {
+          if (!cancelled) setError(errors("billingLoadFailed"));
+        });
+    };
+    load();
+    const timer = window.setInterval(load, options.intervalMs);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [hydrated, urlReady, picked, options.unsynced, options.supplier, options.intervalMs, errors]);
+
+  const chooseDay = (value: string) => {
+    const next = value.trim();
+    setPicked(next || null);
+    const url = new URL(window.location.href);
+    if (next) url.searchParams.set("day", next);
+    else url.searchParams.delete("day");
+    window.history.replaceState(null, "", `${url.pathname}${url.search}${url.hash}`);
+  };
+
+  return { hydrated, bill, error, pickerValue, chooseDay };
+}
+
+export function BillDayControl({ value, onChange }: { value: string; onChange: (day: string) => void }) {
+  const t = useTranslations("billing");
+  return (
+    <input
+      type="date"
+      className="h-9 rounded-control border-0 bg-input px-3 text-sm"
+      value={value}
+      aria-label={t("pickDay")}
+      onChange={(event) => onChange(event.target.value)}
+    />
+  );
+}
+
+export function BillPeriod({ bill }: { bill: Bill }) {
+  const t = useTranslations("billing");
+  if (bill.publication === "unpublished") {
+    return <span className="text-secondary">{t("unpublishedLine", { day: bill.requestedDay ?? "—" })}</span>;
+  }
+  if (bill.publication === "latest" && bill.billDay) {
+    return <span className="text-secondary">{t("latestPublished", { day: bill.billDay })}</span>;
+  }
+  if (bill.publication === "none" || !bill.billDay) {
+    return <span className="text-secondary">{t("nonePublished")}</span>;
+  }
+  return <span className="text-secondary">{t("periodLine", { day: bill.billDay })}</span>;
+}
+
+export function DisabledGatewayLine({ bill }: { bill: Bill }) {
+  const t = useTranslations("billing");
+  const locale = useLocale();
+  if (!bill.disabledGateway?.channels) return null;
+  return (
+    <p className="text-sm text-muted">
+      {t("disabledGatewayExcluded")}
+      <span className="ml-2 tabular-nums">{disabledGatewayAmountText(bill.disabledGateway, (value) => formatUsd(value, locale), t("missingData"), t("incomplete"))}</span>
+    </p>
+  );
+}
 
 type BillingT = ReturnType<typeof useTranslations>;
 
@@ -158,14 +268,11 @@ function Donut({
 
 export function BillingView() {
   const { user } = useConnections();
-  const hydrated = useIsClient();
   const t = useTranslations("billing");
   const ct = useTranslations("channels");
-  const errors = useTranslations("errors");
   const locale = useLocale();
-  const [bill, setBill] = useState<Bill | null>(null);
+  const { hydrated, bill, error, pickerValue, chooseDay } = useBillingBill({ intervalMs: 5000 });
   const [overview, setOverview] = useState<OverviewStats | null>(null);
-  const [error, setError] = useState("");
   const admin = user?.role === "admin";
 
   useEffect(() => {
@@ -183,29 +290,6 @@ export function BillingView() {
     };
   }, [hydrated]);
 
-  useEffect(() => {
-    if (!hydrated) return;
-    let cancelled = false;
-    const load = () => {
-      void fetch(`/api/billing`, { cache: "no-store" }).then(async (res) => {
-        if (!res.ok) {
-          if (!cancelled) setError(errors("billingLoadFailed"));
-          return;
-        }
-        if (!cancelled) {
-          setBill((await res.json()) as Bill);
-          setError("");
-        }
-      });
-    };
-    load();
-    const timer = window.setInterval(load, 5000);
-    return () => {
-      cancelled = true;
-      window.clearInterval(timer);
-    };
-  }, [hydrated, errors]);
-
   if (!hydrated || !bill) return <p className="text-sm text-muted">{t("loading")}</p>;
   const money = (value: number) => formatUsd(value, locale);
   const noAmounts = Boolean(bill.incomplete) && bill.byType.length === 0;
@@ -220,7 +304,21 @@ export function BillingView() {
           <div className="mb-3 grid grid-cols-2 gap-3 xl:grid-cols-4">
             <KpiRing label={ct("stats.total")} value={overview.total.toLocaleString(locale)} ratio={1} tone="#0A0A0A" hint="" />
             <KpiRing label={ct("stats.running")} value={overview.running.toLocaleString(locale)} ratio={overview.total ? overview.running / overview.total : 0} tone="#16A34A" hint={ct("stats.share", { percent: overview.total ? Math.round((overview.running / overview.total) * 1000) / 10 : 0 })} />
-            <KpiRing label={ct("stats.anomaly")} value={overview.anomaly.toLocaleString(locale)} ratio={overview.total ? overview.anomaly / overview.total : 0} tone="#DC2626" hint={ct("stats.anomalyHint", { auto: overview.autoDisabled, pull: overview.pullFailed })} />
+            <KpiRing
+              label={ct("stats.anomaly")}
+              value={overview.anomaly.toLocaleString(locale)}
+              ratio={overview.total ? overview.anomaly / overview.total : 0}
+              tone="#DC2626"
+              hint={
+                <span>
+                  {ct("stats.anomalyAuto", { auto: overview.autoDisabled })}
+                  {" · "}
+                  {ct("stats.anomalyPull", { pull: overview.pullFailed })}
+                  {" · "}
+                  <span className="text-warn">{ct("stats.anomalyMissing", { missing: overview.upstreamMissing ?? 0 })}</span>
+                </span>
+              }
+            />
             <KpiRing label={ct("stats.today")} value={formatUsd(overview.todayQuota, locale)} ratio={overview.yesterdayQuota > 0 ? Math.min(1, overview.todayQuota / overview.yesterdayQuota) : 1} tone="#FF9500" hint={ct("stats.yesterday", { amount: formatUsd(overview.yesterdayQuota, locale), delta: deltaText(overview.todayQuota, overview.yesterdayQuota) })} />
           </div>
           {overview.pausedGateways ? <p className="mb-3 text-sm text-muted">{ct("stats.pausedGateways", { count: overview.pausedGateways })}</p> : null}
@@ -228,10 +326,12 @@ export function BillingView() {
         </>
       ) : null}
       {error ? <div className="mb-4"><Alert tone="danger">{error}</Alert></div> : null}
+      {bill.publication === "unpublished" ? <div className="mb-4"><Alert tone="info">{t("unpublishedHint", { day: bill.requestedDay ?? "—" })}</Alert></div> : null}
       <div className="mb-4 flex flex-wrap items-center gap-3 text-sm">
-        <span className="text-secondary">{t("periodLine", { day: bill.billDay ?? "—" })}</span>
-        {bill.publishedAt ? <span className="rounded-full bg-ok-soft px-2.5 py-0.5 text-xs font-semibold text-ok">{t("publishedPill")}</span> : null}
-        {bill.collecting ? (
+        <BillDayControl value={pickerValue} onChange={chooseDay} />
+        <BillPeriod bill={bill} />
+        {bill.publishedAt && bill.publication !== "unpublished" ? <span className="rounded-full bg-ok-soft px-2.5 py-0.5 text-xs font-semibold text-ok">{t("publishedPill")}</span> : null}
+        {bill.publication !== "unpublished" && bill.collecting ? (
           <span className="whitespace-nowrap rounded-full bg-warn-soft px-3 py-1 text-warn">
             {bill.progress.etaMinutes ? t("collectingEta", { ok: bill.progress.ok, total: bill.progress.total, minutes: bill.progress.etaMinutes }) : t("collecting", { ok: bill.progress.ok, total: bill.progress.total })}
           </span>
@@ -250,6 +350,7 @@ export function BillingView() {
         <Donut title={t("byChannel")} slices={bill.byChannel} size={168} stroke={18} center={totalLabel} caption={totalCaption} empty={t("noData")} unknown={t("unknownSupplier")} money={money} />
         <Donut title={t("byGroup")} slices={bill.byGroup} size={168} stroke={18} center={totalLabel} caption={totalCaption} empty={t("noData")} unknown={t("unknownSupplier")} money={money} />
       </div>
+      <div className="mt-3"><DisabledGatewayLine bill={bill} /></div>
     </div>
   );
 }

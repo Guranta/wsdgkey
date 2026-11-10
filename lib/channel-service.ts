@@ -85,6 +85,8 @@ export type ChannelView = {
   autoDisabledAt: number | null;
   createdHere: boolean;
   upstreamMissing: boolean;
+  /** Set only when a complete list sweep confirms the upstream id is absent. */
+  missingConfirmedAt: number | null;
   gatewayDisabled: boolean;
   origin: "created" | "imported";
 };
@@ -164,6 +166,7 @@ function view(row: ChannelRow, baseline: number | null): ChannelView {
     autoDisabledAt: row.auto_disabled_at ? Number(row.auto_disabled_at) : timeFromHistory(history),
     createdHere: Number(row.created_here) === 1,
     upstreamMissing: Number(row.upstream_missing) === 1,
+    missingConfirmedAt: row.missing_confirmed_at ? Number(row.missing_confirmed_at) : null,
     gatewayDisabled: Number(row.gateway_disabled) === 1,
     origin: String(row.origin ?? "created") === "imported" ? "imported" : "created",
   };
@@ -229,7 +232,6 @@ async function loadStats(scopeWhere: string, scopeParams: unknown[], day: string
   const bounds = days.map((item) => shanghaiMidnight(addDays(item, 1)));
   const createdBefore = (end: number, match: (row: ChannelRow) => boolean) =>
     rows.reduce((count, row) => (Number(row.created_at ?? 0) < end && match(row) ? count + 1 : count), 0);
-  const liveGateway = (row: ChannelRow) => Number(row.gateway_disabled) !== 1;
   const enabledRow = (row: ChannelRow) => Number(row.status) === 1 && Number(row.upstream_missing) !== 1;
   const disabledRow = (row: ChannelRow) => Number(row.status) !== 1;
   const todayOf = (row: ChannelRow) => {
@@ -256,13 +258,14 @@ async function loadStats(scopeWhere: string, scopeParams: unknown[], day: string
   const pull = (await dbGet(
     `SELECT
        COALESCE(SUM(CASE WHEN COALESCE(g.disabled, 0) = 0 AND c.sync_status = 'ok' AND c.upstream_missing = 0 THEN 1 ELSE 0 END), 0) AS ok_n,
-       COALESCE(SUM(CASE WHEN COALESCE(g.disabled, 0) = 0 AND c.sync_status = 'pending' THEN 1 ELSE 0 END), 0) AS queued_n,
-       COALESCE(SUM(CASE WHEN COALESCE(g.disabled, 0) = 0 AND c.next_poll_at > ? AND c.consecutive_failures >= 2 THEN 1 ELSE 0 END), 0) AS backoff_n,
-       COALESCE(SUM(CASE WHEN COALESCE(g.disabled, 0) = 0 AND c.consecutive_failures >= 3 AND c.sync_status NOT IN ('ok', 'pending') THEN 1 ELSE 0 END), 0) AS throttled_n,
-       COALESCE(SUM(CASE WHEN COALESCE(g.disabled, 0) = 0 AND c.sync_status NOT IN ('ok', 'pending', 'missing') THEN 1 ELSE 0 END), 0) AS failed_n,
-       COALESCE(SUM(CASE WHEN COALESCE(g.disabled, 0) = 0 AND (c.sync_status IN ('missing', 'unsynced') OR c.upstream_missing = 1) THEN 1 ELSE 0 END), 0) AS unsynced_n,
+       COALESCE(SUM(CASE WHEN COALESCE(g.disabled, 0) = 0 AND c.upstream_missing = 0 AND c.sync_status = 'pending' THEN 1 ELSE 0 END), 0) AS queued_n,
+       COALESCE(SUM(CASE WHEN COALESCE(g.disabled, 0) = 0 AND c.upstream_missing = 0 AND c.next_poll_at > ? AND c.consecutive_failures >= 2 THEN 1 ELSE 0 END), 0) AS backoff_n,
+       COALESCE(SUM(CASE WHEN COALESCE(g.disabled, 0) = 0 AND c.upstream_missing = 0 AND c.consecutive_failures >= 3 AND c.sync_status NOT IN ('ok', 'pending') THEN 1 ELSE 0 END), 0) AS throttled_n,
+       COALESCE(SUM(CASE WHEN COALESCE(g.disabled, 0) = 0 AND c.upstream_missing = 0 AND c.sync_status NOT IN ('ok', 'pending', 'missing') THEN 1 ELSE 0 END), 0) AS failed_n,
+       COALESCE(SUM(CASE WHEN COALESCE(g.disabled, 0) = 0 AND c.upstream_missing = 0 AND c.sync_status IN ('missing', 'unsynced') THEN 1 ELSE 0 END), 0) AS unsynced_n,
        COALESCE(SUM(CASE WHEN COALESCE(g.disabled, 0) = 0 AND c.status = 3 AND c.upstream_missing = 0 THEN 1 ELSE 0 END), 0) AS auto_n,
-       COALESCE(SUM(CASE WHEN COALESCE(g.disabled, 0) = 0 AND (c.upstream_missing = 1 OR c.sync_status NOT IN ('ok', 'pending')) THEN 1 ELSE 0 END), 0) AS pull_n,
+       COALESCE(SUM(CASE WHEN COALESCE(g.disabled, 0) = 0 AND c.upstream_missing = 0 AND c.status <> 3 AND c.sync_status NOT IN ('ok', 'pending') THEN 1 ELSE 0 END), 0) AS pull_n,
+       COALESCE(SUM(CASE WHEN COALESCE(g.disabled, 0) = 0 AND c.upstream_missing = 1 THEN 1 ELSE 0 END), 0) AS missing_n,
        COALESCE(SUM(CASE WHEN COALESCE(g.disabled, 0) = 1 THEN 1 ELSE 0 END), 0) AS paused_n
      FROM channels c
      LEFT JOIN gateways g ON g.id = c.gateway_id
@@ -270,14 +273,18 @@ async function loadStats(scopeWhere: string, scopeParams: unknown[], day: string
     [Date.now(), ...scopeParams],
   )) as ChannelRow | undefined;
   const queue = upstreamQueue.snapshot();
+  const autoDisabled = Number(pull?.auto_n ?? 0);
+  const pullFailed = Number(pull?.pull_n ?? 0);
+  const upstreamMissing = Number(pull?.missing_n ?? 0);
   return {
     total: rows.length,
     enabled: rows.reduce((count, row) => count + (enabledRow(row) ? 1 : 0), 0),
     disabled: rows.reduce((count, row) => count + (disabledRow(row) ? 1 : 0), 0),
     running: rows.reduce((count, row) => count + (enabledRow(row) ? 1 : 0), 0),
-    anomaly: rows.reduce((count, row) => count + (liveGateway(row) && (Number(row.status) === 3 || Number(row.upstream_missing) === 1) ? 1 : 0), 0),
-    autoDisabled: Number(pull?.auto_n ?? 0),
-    pullFailed: Number(pull?.pull_n ?? 0),
+    anomaly: autoDisabled + pullFailed + upstreamMissing,
+    autoDisabled,
+    pullFailed,
+    upstreamMissing,
     pausedGateways: Number(pull?.paused_n ?? 0),
     todayQuota,
     yesterdayQuota: Number(yesterdayRow?.n ?? 0),
@@ -1020,19 +1027,21 @@ export async function syncGatewayPage(gatewayId: string, page: number): Promise<
   }
 }
 
-/** A full upstream list finished. Missing ids stay as local rows when we created them; a new id is never attached to an old row. */
+/** A full upstream list finished. Missing ids stay as local rows when we created them; a new id is never attached to an old row.
+ *  Caller already passed judgeListPage: explicit total, unique ids collected, no errors. Status is not changed and rows are not deleted. */
 async function finishGatewayList(gatewayId: string): Promise<void> {
+  const confirmedAt = Date.now();
   await dbRun(
-    `UPDATE channels SET upstream_missing = 0
+    `UPDATE channels SET upstream_missing = 0, missing_confirmed_at = NULL
      WHERE gateway_id = ? AND created_here = 1
        AND upstream_id IN (SELECT upstream_id FROM gateway_list_seen WHERE gateway_id = ?)`,
     [gatewayId, gatewayId],
   );
   await dbRun(
-    `UPDATE channels SET upstream_missing = 1, sync_status = 'missing', sync_error = 'missing'
+    `UPDATE channels SET upstream_missing = 1, sync_status = 'missing', sync_error = 'missing', missing_confirmed_at = ?
      WHERE gateway_id = ? AND created_here = 1
        AND upstream_id NOT IN (SELECT upstream_id FROM gateway_list_seen WHERE gateway_id = ?)`,
-    [gatewayId, gatewayId],
+    [confirmedAt, gatewayId, gatewayId],
   );
   await dbRun("DELETE FROM channels WHERE gateway_id = ? AND created_here = 0", [gatewayId]);
   await dbRun("DELETE FROM gateway_list_seen WHERE gateway_id = ?", [gatewayId]);
