@@ -49,4 +49,5 @@
 ## 关联
 
 - 设计差异：[`2026-11-10-supplier-subaccounts-diff.md`](./2026-11-10-supplier-subaccounts-diff.md)
+- 验收：[`2026-11-10-supplier-subaccounts-acceptance.md`](./2026-11-10-supplier-subaccounts-acceptance.md)
 - 相关但分开，不并入那份定稿：[`2026-11-08-boss-jwt-requirements.md`](./2026-11-08-boss-jwt-requirements.md) 里的搜索、上 key、「本系统上的」。
