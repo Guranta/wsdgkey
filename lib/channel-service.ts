@@ -11,7 +11,7 @@ import {
 } from "./channel-payload";
 import { dbAll, dbGet, dbRun } from "./db";
 import { gatewayApi } from "./gateway-adapter";
-import { getGateway, type GatewaySecret } from "./gateways";
+import { gatewayVisibleTo, getGateway, type GatewaySecret } from "./gateways";
 import { atChannelCap, isBaseUrlDenial, sellerCreateBodies } from "./seller-payload";
 import { snapshotCreateBaseline } from "./billing-service";
 import { ensureBinding } from "./rebind";
@@ -176,12 +176,7 @@ function canSee(actor: SessionUser, creatorId: string | null): boolean {
 
 function assertOperableGateway(actor: SessionUser, gateway: { kind: string; ownerUserId: string | null }): void {
   if (actor.role === "admin") return;
-  if (actor.parentUserId) {
-    if (gateway.kind === "newapi_admin") return;
-    if (gateway.ownerUserId !== actor.parentUserId) throw httpError("gatewayMissing", 404);
-    return;
-  }
-  if (gateway.kind === "newapi_seller" && gateway.ownerUserId !== actor.id) throw httpError("gatewayMissing", 404);
+  if (!gatewayVisibleTo(actor, gateway)) throw httpError("gatewayMissing", 404);
 }
 
 function fingerprint(key: string): string {
