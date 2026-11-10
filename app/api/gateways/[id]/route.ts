@@ -6,6 +6,7 @@ import { readJson } from "@/lib/http";
 export async function PATCH(req: Request, ctx: { params: Promise<{ id: string }> }) {
   const user = await currentUser();
   if (!user) return apiError("loginRequired", 401);
+  if (user.parentUserId) return apiError("forbidden", 403);
   const { id } = await ctx.params;
   const body = (await readJson(req)) as Record<string, unknown> | null;
   const existing = await getGateway(id);

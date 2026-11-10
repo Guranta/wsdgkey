@@ -5,6 +5,7 @@ import type { SellerCapabilities } from "./seller-payload";
 import type { SellerSession } from "./seller-auth";
 import { takeProbe, probeSellerLogin } from "./seller-auth";
 import { DEFAULT_SELLER_GATEWAY_NAME } from "./seller-name";
+import { assertCanManageGateways, scopeOwnerId } from "./scope";
 import type { SessionUser } from "./types";
 import { isBlockedHost, normalizeBaseUrl } from "./url";
 
@@ -261,6 +262,7 @@ export async function createSupplierGateway(
   actor: SessionUser,
   input: { name: string; baseUrl: string; username: string; password: string; probeId?: string; tlsExceptionHost?: string },
 ): Promise<GatewayPublic> {
+  assertCanManageGateways(actor);
   const baseUrl = assertUrl(input.baseUrl);
   const host = new URL(baseUrl).hostname;
   const name = input.name.trim() || `jwt-${host.replace(/[^a-z0-9]+/gi, "-")}`;
@@ -298,6 +300,7 @@ export async function createSellerGateway(
   actor: SessionUser,
   input: { name: string; baseUrl: string; username: string; password: string; probeId?: string },
 ): Promise<GatewayPublic> {
+  assertCanManageGateways(actor);
   const name = input.name.trim() || DEFAULT_SELLER_GATEWAY_NAME;
   if (name.length > 40) throw Object.assign(new Error("gatewayName"), { status: 400 });
   const baseUrl = assertUrl(input.baseUrl);
@@ -330,9 +333,10 @@ export async function updateSellerGateway(
   id: string,
   input: { name: string; baseUrl: string; username: string; password: string; probeId?: string },
 ): Promise<GatewayPublic | null> {
+  assertCanManageGateways(actor);
   const existing = await getGateway(id);
   if (!existing || existing.kind !== "newapi_seller") return null;
-  if (actor.role !== "admin" && existing.ownerUserId !== actor.id) return null;
+  if (actor.role !== "admin" && existing.ownerUserId !== scopeOwnerId(actor)) return null;
   const name = input.name.trim() || existing.name;
   if (!name || name.length > 40) throw Object.assign(new Error("gatewayName"), { status: 400 });
   const baseUrl = assertUrl(input.baseUrl);
@@ -358,6 +362,7 @@ export async function updateSellerGateway(
 }
 
 export async function renewalAlertsFor(actor: SessionUser): Promise<{ id: string; name: string; checkedAt: number | null; expiresAt: number | null; detail: string }[]> {
+  if (actor.parentUserId) return [];
   const rows = (await dbAll(
     `SELECT id, name, auth_checked_at, access_expires_at, auth_error FROM gateways
      WHERE kind = 'newapi_seller' AND auth_status = 'failed' AND disabled = 0 AND (? = 'admin' OR owner_user_id = ?)`,
@@ -372,10 +377,18 @@ export async function renewalAlertsFor(actor: SessionUser): Promise<{ id: string
   }));
 }
 
+export function gatewayVisibleTo(actor: SessionUser, gateway: { kind: GatewayKind; ownerUserId: string | null }): boolean {
+  if (actor.role === "admin") return true;
+  if (actor.parentUserId) {
+    if (gateway.kind === "newapi_admin") return true;
+    return gateway.ownerUserId === actor.parentUserId;
+  }
+  return gateway.kind !== "newapi_seller" || gateway.ownerUserId === actor.id;
+}
+
 export async function listVisibleGateways(actor: SessionUser): Promise<GatewayPublic[]> {
   const all = await listGateways();
-  if (actor.role === "admin") return all;
-  return all.filter((item) => item.kind !== "newapi_seller" || item.ownerUserId === actor.id);
+  return all.filter((item) => gatewayVisibleTo(actor, item));
 }
 
 export async function listOwnSellerGateways(actor: SessionUser): Promise<GatewayPublic[]> {

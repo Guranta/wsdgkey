@@ -8,6 +8,8 @@ export type SessionUser = {
   name: string;
   role: Role;
   locale: Locale | null;
+  /** Set when this login is a supplier sub-account. The parent is the data owner. */
+  parentUserId: string | null;
   /** Top-bar site name. Defaults to the product brand. */
   siteName?: string;
   renewalAlerts?: { id: string; name: string; checkedAt: number | null; expiresAt: number | null; detail: string }[];

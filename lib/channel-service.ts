@@ -20,6 +20,7 @@ import { pollDelayMs } from "./billing-math";
 import { addDays, shanghaiClock, shanghaiMidnight } from "./shanghai";
 import { testCooldownMs } from "./settings";
 import { cheapestModel } from "./test-model";
+import { channelCreatorId, scopeOwnerId } from "./scope";
 import type { SessionUser } from "./types";
 import {
   addUpstreamChannel,
@@ -170,7 +171,17 @@ function httpError(message: string, status: number, values?: Record<string, stri
 }
 
 function canSee(actor: SessionUser, creatorId: string | null): boolean {
-  return actor.role === "admin" || creatorId === actor.id;
+  return actor.role === "admin" || creatorId === scopeOwnerId(actor);
+}
+
+function assertOperableGateway(actor: SessionUser, gateway: { kind: string; ownerUserId: string | null }): void {
+  if (actor.role === "admin") return;
+  if (actor.parentUserId) {
+    if (gateway.kind === "newapi_admin") return;
+    if (gateway.ownerUserId !== actor.parentUserId) throw httpError("gatewayMissing", 404);
+    return;
+  }
+  if (gateway.kind === "newapi_seller" && gateway.ownerUserId !== actor.id) throw httpError("gatewayMissing", 404);
 }
 
 function fingerprint(key: string): string {
@@ -300,11 +311,12 @@ export async function queryChannels(actor: SessionUser, search: URLSearchParams)
   const params: unknown[] = [];
   const scope = ["c.created_here = 1"];
   const scopeParams: unknown[] = [];
+  const ownerId = scopeOwnerId(actor);
   if (actor.role !== "admin") {
     where.push("c.creator_user_id = ?");
-    params.push(actor.id);
+    params.push(ownerId);
     scope.push("c.creator_user_id = ?");
-    scopeParams.push(actor.id);
+    scopeParams.push(ownerId);
   } else if (creator) {
     where.push("c.creator_user_id = ?");
     params.push(creator);
@@ -354,14 +366,14 @@ export async function queryChannels(actor: SessionUser, search: URLSearchParams)
   )) as ChannelRow[];
   const groups = (await dbAll(
     `SELECT DISTINCT group_name FROM channels c WHERE c.created_here = 1 AND ${actor.role === "admin" ? "1 = 1" : "c.creator_user_id = ?"} ORDER BY group_name`,
-    actor.role === "admin" ? [] : [actor.id],
+    actor.role === "admin" ? [] : [ownerId],
   )) as { group_name: string }[];
   const creators = (await dbAll(
     `SELECT DISTINCT u.id, u.name, u.username FROM channels c JOIN users u ON u.id = c.creator_user_id WHERE c.created_here = 1 ORDER BY u.name`,
   )) as { id: string; name: string; username: string }[];
   const types = (await dbAll(
     `SELECT DISTINCT type FROM channels c WHERE c.created_here = 1 AND ${actor.role === "admin" ? "1 = 1" : "c.creator_user_id = ?"} ORDER BY type`,
-    actor.role === "admin" ? [] : [actor.id],
+    actor.role === "admin" ? [] : [ownerId],
   )) as { type: number }[];
   const stats = await loadStats(scope.join(" AND "), scopeParams, day);
   return {
@@ -384,7 +396,7 @@ export async function queryChannels(actor: SessionUser, search: URLSearchParams)
     stats,
     items: rows.map((row) => view(row, row.today_baseline === null || row.today_baseline === undefined ? null : Number(row.today_baseline))),
     groups: groups.map((item) => item.group_name).filter(Boolean),
-    creators: actor.role === "admin" ? creators : creators.filter((item) => item.id === actor.id),
+    creators: actor.role === "admin" ? creators : creators.filter((item) => item.id === ownerId),
     types: types.map((item) => ({ id: Number(item.type), name: channelTypeName(Number(item.type)) })),
   };
 }
@@ -463,9 +475,10 @@ async function createSupplierChannels(actor: SessionUser, gateway: GatewaySecret
       item.name === `${prefix}-${form.name}` ||
       (prefix && item.name === `${prefix}${form.name}`);
     if (!match || item.owned !== true) continue;
-    const id = await rememberChannel(gateway.id, item, actor.id, fingerprint(keys[0] ?? ""));
+    const creator = scopeOwnerId(actor);
+    const id = await rememberChannel(gateway.id, item, creator, fingerprint(keys[0] ?? ""));
     if (id) {
-      await dbRun("UPDATE channels SET created_here = 1, creator_user_id = ?, origin = 'created' WHERE id = ?", [actor.id, id]);
+      await dbRun("UPDATE channels SET created_here = 1, creator_user_id = ?, origin = 'created' WHERE id = ?", [creator, id]);
       await ensureBinding(id, gateway.id, item.id, 0);
       createdIds.push(id);
       claimed += 1;
@@ -486,7 +499,7 @@ async function createSellerChannels(actor: SessionUser, gateway: GatewaySecret, 
   const api = gatewayApi(gateway);
   const caps = (await api.list(1)).capabilities;
   if (atChannelCap(caps, keys.length)) throw httpError("atSiteLimit", 400);
-  const owner = gateway.ownerUserId || actor.id;
+  const owner = channelCreatorId(actor, gateway.ownerUserId);
   const before = new Set(
     ((await dbAll("SELECT upstream_id FROM channels WHERE gateway_id = ?", [gateway.id])) as { upstream_id: number }[]).map((item) => Number(item.upstream_id)),
   );
@@ -536,7 +549,7 @@ async function createSellerChannels(actor: SessionUser, gateway: GatewaySecret, 
 export async function createChannels(actor: SessionUser, body: Record<string, unknown>) {
   const gateway = await getGateway(String(body.gatewayId ?? ""));
   if (!gateway) throw httpError("gatewayRequired", 400);
-  if (actor.role !== "admin" && gateway.kind === "newapi_seller" && gateway.ownerUserId !== actor.id) throw httpError("gatewayMissing", 404);
+  assertOperableGateway(actor, gateway);
   if (gateway.kind === "newapi_seller") return createSellerChannels(actor, gateway, body);
   if (gateway.kind === "newapi_supplier") return createSupplierChannels(actor, gateway, body);
   const form = formFromInput(body);
@@ -561,10 +574,11 @@ export async function createChannels(actor: SessionUser, body: Record<string, un
     const listed = await listUpstreamChannels(gateway, page);
     for (const item of listed.items) {
       if (before.has(item.id) || item.name !== form.name) continue;
-      const id = await rememberChannel(gateway.id, item, actor.id, fingerprint(keys[claimed] ?? keys[0] ?? ""));
+      const creator = scopeOwnerId(actor);
+      const id = await rememberChannel(gateway.id, item, creator, fingerprint(keys[claimed] ?? keys[0] ?? ""));
       if (id) {
         const quota = Number.isFinite(item.usedQuota) ? item.usedQuota : 0;
-        await dbRun("UPDATE channels SET created_here = 1, creator_user_id = ?, create_baseline = ? WHERE id = ?", [actor.id, quota, id]);
+        await dbRun("UPDATE channels SET created_here = 1, creator_user_id = ?, create_baseline = ? WHERE id = ?", [creator, quota, id]);
         await snapshotCreateBaseline(id, quota);
         await ensureBinding(id, gateway.id, item.id, quota);
         createdIds.push(id);
@@ -673,11 +687,11 @@ export async function updateChannel(actor: SessionUser, id: string, body: Record
   const row = await ownedRow(actor, id);
   const gateway = await getGateway(String(row.gateway_id));
   if (!gateway) throw httpError("gatewayMissing", 404);
+  if (gateway.kind === "newapi_supplier" && Number(row.owned ?? 0) !== 1) throw httpError("supplierNotOwned", 403);
   const form = formFromInput(body, formFromRow(row));
   form.key = String(body.key ?? "");
   const error = validateChannelForm(form, true);
   if (error) throw httpError(error, 400);
-  if (gateway.kind === "newapi_supplier" && Number(row.owned ?? 0) !== 1) throw httpError("supplierNotOwned", 403);
   const payload =
     gateway.kind === "newapi_supplier"
       ? (() => {
@@ -953,8 +967,8 @@ async function finishGatewayList(gatewayId: string): Promise<void> {
 export async function importSellerChannels(actor: SessionUser, gatewayId: string) {
   const gateway = await getGateway(gatewayId);
   if (!gateway || (gateway.kind !== "newapi_seller" && gateway.kind !== "newapi_supplier")) throw httpError("gatewayMissing", 404);
-  if (actor.role !== "admin" && gateway.ownerUserId !== actor.id) throw httpError("gatewayMissing", 404);
-  const owner = gateway.ownerUserId || actor.id;
+  if (actor.role !== "admin" && gateway.ownerUserId !== scopeOwnerId(actor)) throw httpError("gatewayMissing", 404);
+  const owner = channelCreatorId(actor, gateway.ownerUserId);
   const api = gatewayApi(gateway);
   let imported = 0;
   let skipped = 0;
@@ -999,7 +1013,7 @@ export async function importSellerChannels(actor: SessionUser, gatewayId: string
 export async function readSellerCap(actor: SessionUser, gatewayId: string) {
   const gateway = await getGateway(gatewayId);
   if (!gateway || gateway.kind !== "newapi_seller") throw httpError("gatewayMissing", 404);
-  if (actor.role !== "admin" && gateway.ownerUserId !== actor.id) throw httpError("gatewayMissing", 404);
+  if (actor.role !== "admin" && gateway.ownerUserId !== scopeOwnerId(actor)) throw httpError("gatewayMissing", 404);
   const listed = await gatewayApi(gateway).list(1);
   return listed.capabilities ?? { canWrite: gateway.canWrite, canToggle: gateway.canToggle, canEditRouting: gateway.canEditRouting, maxChannels: gateway.maxChannels, total: gateway.siteChannelTotal };
 }

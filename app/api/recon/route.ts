@@ -1,7 +1,7 @@
 import { apiError, fromError } from "@/lib/api-error";
 import { sellerSnapshotGrid } from "@/lib/billing-service";
 import { currentUser } from "@/lib/current-user";
-import { getGateway, listVisibleGateways } from "@/lib/gateways";
+import { gatewayVisibleTo, getGateway, listVisibleGateways } from "@/lib/gateways";
 import { readJson } from "@/lib/http";
 import { applyReconAction, reconPage } from "@/lib/recon-service";
 
@@ -15,7 +15,7 @@ export async function GET(req: Request) {
   const choices = visible.map((item) => ({ id: item.id, name: item.name, kind: item.kind }));
   if (gatewayId) {
     const gateway = await getGateway(gatewayId);
-    const allowed = gateway && (user.role === "admin" || gateway.kind !== "newapi_seller" || gateway.ownerUserId === user.id);
+    const allowed = gateway && gatewayVisibleTo(user, gateway);
     if (allowed && gateway?.kind === "newapi_seller") {
       const snapshot = await sellerSnapshotGrid(user, gatewayId);
       return Response.json({ mode: "snapshot", snapshot, gateways: [], choices }, { headers: { "cache-control": "no-store" } });

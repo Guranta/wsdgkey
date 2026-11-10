@@ -22,7 +22,9 @@ const SCHEMA = [
     role TEXT NOT NULL,
     disabled INTEGER NOT NULL DEFAULT 0,
     credential_version INTEGER NOT NULL DEFAULT 0,
-    created_at INTEGER NOT NULL
+    created_at INTEGER NOT NULL,
+    parent_user_id TEXT,
+    last_login_at INTEGER
   )`,
   `CREATE TABLE IF NOT EXISTS connections (
     id TEXT PRIMARY KEY,
@@ -468,7 +470,12 @@ export async function ensureReady(): Promise<void> {
         ["finding", "TEXT NOT NULL DEFAULT ''"],
         ["log_quota", "REAL"],
       ]);
-      await addMissingColumns(db, "users", [["locale", "TEXT"]]);
+      await addMissingColumns(db, "users", [
+        ["locale", "TEXT"],
+        ["parent_user_id", "TEXT"],
+        ["last_login_at", "INTEGER"],
+      ]);
+      await db.exec("CREATE INDEX IF NOT EXISTS users_parent ON users(parent_user_id)");
       // 供应商 JWT 网关（docs/plans/2026-11-05-supplier-jwt-gateway.md §3/§9）
       await addMissingColumns(db, "gateways", [
         ["allowed_origin", "TEXT"],

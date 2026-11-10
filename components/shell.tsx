@@ -10,7 +10,13 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { Suspense, useState, type ReactNode } from "react";
 
-type NavItem = { href: string; labelKey: "channels" | "billing" | "bills" | "recon" | "users" | "settings"; color: string; admin?: boolean };
+type NavItem = {
+  href: string;
+  labelKey: "channels" | "billing" | "bills" | "recon" | "users" | "subAccounts" | "settings";
+  color: string;
+  admin?: boolean;
+  parentOnly?: boolean;
+};
 
 const NAV: NavItem[] = [
   { href: "/billing", labelKey: "billing", color: "#FF9500" },
@@ -18,6 +24,7 @@ const NAV: NavItem[] = [
   { href: "/bills", labelKey: "bills", color: "#30B0C7" },
   { href: "/recon", labelKey: "recon", color: "#7C5CFC" },
   { href: "/admin/users", labelKey: "users", color: "#FF2D55", admin: true },
+  { href: "/sub-accounts", labelKey: "subAccounts", color: "#5E5CE6", parentOnly: true },
   { href: "/settings", labelKey: "settings", color: "#A2845E" },
 ];
 
@@ -36,7 +43,11 @@ function NavLinks({ collapsed, onNavigate }: { collapsed: boolean; onNavigate?: 
   const pathname = usePathname();
   const { user } = useConnections();
   const t = useTranslations("nav");
-  const items = NAV.filter((item) => !item.admin || user?.role === "admin");
+  const items = NAV.filter((item) => {
+    if (item.admin && user?.role !== "admin") return false;
+    if (item.parentOnly && (user?.role !== "supplier" || user.parentUserId)) return false;
+    return true;
+  });
   return (
     <nav className={cn("flex flex-col gap-1 pt-3", collapsed ? "px-2" : "px-2.5")}>
       {items.map((item) => {
