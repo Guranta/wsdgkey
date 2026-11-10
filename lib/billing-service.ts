@@ -1,5 +1,5 @@
-import { deriveBaseline, NEAR_MIDNIGHT_MS, reconcileFinding, resolveConsumption, resolveSellerConsumption, todayExcludingTests, type BaselinePoint } from "./billing-math";
-import { rollupReadingValues, type ReadingSummary } from "./billing-query";
+import { dailyDiff, deriveBaseline, NEAR_MIDNIGHT_MS, reconcileFinding, resolveConsumption, resolveSellerConsumption, todayExcludingTests, type BaselinePoint, type BillingQuality } from "./billing-math";
+import { columnSummary, rollupReadingValues, type ReadingSummary } from "./billing-query";
 import { CALLS_PER_CHANNEL, LIST_SYNC_RESERVE_PER_MIN, type PlanChannel } from "./billing-plan";
 import { channelTypeName } from "./channel-types";
 import { QUOTA_PER_DOLLAR } from "./format";
@@ -358,6 +358,7 @@ export async function publishBill(billDay: string, baselineDay: string): Promise
        aggregation = CASE WHEN billing_runs.status = 'published' THEN billing_runs.aggregation ELSE 'dedup' END`,
     [baselineDay, billDay, Date.now(), Date.now(), counts.total, counts.ok, counts.failed],
   );
+  dropPublishedDay(billDay);
 }
 
 async function countRun(baselineDay: string): Promise<{ total: number; ok: number; failed: number }> {
@@ -596,24 +597,83 @@ function groupSlices(rows: Row[], nameOf: (row: Row) => string, legacy: boolean)
   return slices.sort((a, b) => b.value - a.value);
 }
 
+/** Chart window. Older bill days stay in the table when opened, and stay out of the bars. */
+const TREND_WINDOW_DAYS = 30;
+
+export function clearPublishedDayCache(): void {
+  publishedDayCache.clear();
+}
+
 type DayTotal = {
+  /** Number drawn on the chart and shown in the 合计 今日 cell. Null means 缺数据. */
   value: number | null;
   missing: boolean;
+  partial: boolean;
   readings: number;
   channels: number;
   complete: boolean;
+  legacy: boolean;
+  /** legacyAmount sum, or the dedup reading sum. This is the API total, not the 今日 cell. */
+  consumption: number;
 };
 
-/** The bill-table 合计 for one already-selected row set. No readings stay missing, never 0. */
-function summarizeDay(rows: Row[]): DayTotal {
-  const rollup = rollupReadings(rows);
+/** Today column of a bill row. Snapshot rows use that day's consumption. Admin rows use the channel's today_quota. */
+function rowToday(row: Row): number | null {
+  if (String(row.billing_mode ?? "") === "snapshot") {
+    if (row.consumption === null || row.consumption === undefined) return null;
+    return Number(row.consumption);
+  }
+  if (row.today_quota === null || row.today_quota === undefined) return null;
+  return Number(row.today_quota);
+}
+
+/**
+ * Dedup days total the finite readings. Legacy days keep the pre-#12 consumption sum,
+ * and the chart follows the old 今日 column (null today is missing, never 0).
+ */
+function summarizeDay(rows: Row[], legacy: boolean): DayTotal {
+  if (!legacy) {
+    const rollup = rollupReadings(rows);
+    return {
+      value: rollup.consumption,
+      missing: rollup.readings === 0,
+      partial: false,
+      readings: rollup.readings,
+      channels: rollup.channels,
+      complete: rollup.complete,
+      legacy: false,
+      consumption: rollup.consumption ?? 0,
+    };
+  }
+  const amounts = rows.filter(legacyAmount);
+  const today = columnSummary(rows.map(rowToday));
   return {
-    value: rollup.consumption,
-    missing: rollup.readings === 0,
-    readings: rollup.readings,
-    channels: rollup.channels,
-    complete: rollup.complete,
+    value: today.value,
+    missing: today.missing,
+    partial: today.partial,
+    readings: amounts.length,
+    channels: rows.length,
+    complete: rows.length > 0 && !today.missing && !today.partial,
+    legacy: true,
+    consumption: amounts.reduce((sum, row) => sum + Number(row.consumption ?? 0), 0),
   };
+}
+
+/** One bar per day. A multi-day bill keeps the widest span and labels it 11-05–11-07. */
+function spanOf(rows: Row[]): { span: boolean; spanDays: number; label: string } {
+  let bestDays = 1;
+  let start = "";
+  let end = "";
+  for (const row of rows) {
+    const days = Number(row.span_days ?? 1);
+    if (days > bestDays) {
+      bestDays = days;
+      start = String(row.start_day ?? "");
+      end = String(row.end_day ?? "");
+    }
+  }
+  if (bestDays <= 1 || !start || !end) return { span: false, spanDays: 1, label: "" };
+  return { span: true, spanDays: bestDays, label: `${start.slice(5)}–${end.slice(5)}` };
 }
 
 type DayAssembly = {
@@ -626,6 +686,31 @@ type DayAssembly = {
   total: DayTotal;
 };
 
+type CachedDay = {
+  cached: true;
+  legacy: boolean;
+  unpublished: boolean;
+  total: DayTotal;
+  span: { span: boolean; spanDays: number; label: string };
+};
+
+/** Published chart totals. Keyed by bill day, rule version, and supplier scope. The open day is always recomputed. */
+const publishedDayCache = new Map<string, CachedDay>();
+
+function publishedCacheKey(day: string, aggregation: unknown, scope: string, scopeParams: unknown[]): string {
+  return `${day}|${String(aggregation ?? "")}|${scope}|${scopeParams.map((item) => String(item)).join(",")}`;
+}
+
+function dropPublishedDay(day: string): void {
+  for (const key of publishedDayCache.keys()) {
+    if (key.startsWith(`${day}|`)) publishedDayCache.delete(key);
+  }
+}
+
+function isCachedDay(day: DayAssembly | CachedDay): day is CachedDay {
+  return "cached" in day && day.cached;
+}
+
 /** One day's rows, rule, and 合计. The open bill and every trend day both use this. */
 async function assembleDay(
   billDay: string,
@@ -633,8 +718,9 @@ async function assembleDay(
   scopeParams: unknown[],
   run: Row | undefined,
   roles: Map<string, string> | null,
+  supplier?: SupplierCache | null,
 ): Promise<DayAssembly> {
-  const loaded = await loadMergedRows(billDay, scope, scopeParams);
+  const loaded = await loadMergedRows(billDay, scope, scopeParams, globalRead, supplier);
   const mode = billAggregateMode(run);
   const legacy = mode === "legacy";
   const selected = selectBillRows(loaded.merged, mode, mode === "frozen" ? roles : null);
@@ -645,7 +731,7 @@ async function assembleDay(
     excluded: selected.excluded,
     legacy,
     unpublished: !run || String(run.status) !== "published",
-    total: summarizeDay(selected.preferred),
+    total: summarizeDay(selected.preferred, legacy),
   };
 }
 
@@ -655,7 +741,20 @@ type SqlRead = {
 
 const globalRead: SqlRead = { all: (statement, params = []) => dbAll(statement, params) };
 
-async function loadMergedRows(billDay: string, scope: string, scopeParams: unknown[], db: SqlRead = globalRead): Promise<{ storedRows: Row[]; merged: Row[] }> {
+type SupplierCache = {
+  ids: Set<string>;
+  channels: Row[];
+  snapsByChannel: Map<string, Row[]>;
+  firstBy: Map<string, string>;
+};
+
+async function loadMergedRows(
+  billDay: string,
+  scope: string,
+  scopeParams: unknown[],
+  db: SqlRead = globalRead,
+  supplier?: SupplierCache | null,
+): Promise<{ storedRows: Row[]; merged: Row[] }> {
   const rows = (await db.all(
     `SELECT r.*, c.name, c.group_name, c.balance, c.used_quota, c.today_quota, c.type, c.origin, c.upstream_id,
             COALESCE(g.disabled, 0) AS gateway_disabled, g.base_url AS gateway_base, u.name AS creator_name
@@ -667,19 +766,25 @@ async function loadMergedRows(billDay: string, scope: string, scopeParams: unkno
      ORDER BY c.upstream_id`,
     [billDay, ...scopeParams],
   )) as Row[];
-  const supplierIdRows = (await db.all(
-    `SELECT c.id FROM channels c JOIN gateways g ON g.id = c.gateway_id WHERE g.kind = 'newapi_supplier' AND c.created_here = 1`,
-  )) as { id: string }[];
-  const supplierIds = new Set(supplierIdRows.map((row) => String(row.id)));
-  const supplierChannels = (await db.all(
-    `SELECT c.id, c.name, c.group_name, c.type, u.name AS creator_name, c.imported_at, c.upstream_id, c.used_quota, c.balance,
-            COALESCE(g.disabled, 0) AS gateway_disabled, g.base_url AS gateway_base
-     FROM channels c JOIN gateways g ON g.id = c.gateway_id LEFT JOIN users u ON u.id = c.creator_user_id
-     WHERE g.kind = 'newapi_supplier' AND c.created_here = 1 ${scope}`,
-    scopeParams,
-  )) as Row[];
+  const supplierIds = supplier
+    ? supplier.ids
+    : new Set(
+        ((await db.all(
+          `SELECT c.id FROM channels c JOIN gateways g ON g.id = c.gateway_id WHERE g.kind = 'newapi_supplier' AND c.created_here = 1`,
+        )) as { id: string }[]).map((row) => String(row.id)),
+      );
+  const supplierChannels = supplier
+    ? supplier.channels
+    : ((await db.all(
+        `SELECT c.id, c.name, c.group_name, c.type, u.name AS creator_name, c.imported_at, c.upstream_id, c.used_quota, c.balance,
+                COALESCE(g.disabled, 0) AS gateway_disabled, g.base_url AS gateway_base
+         FROM channels c JOIN gateways g ON g.id = c.gateway_id LEFT JOIN users u ON u.id = c.creator_user_id
+         WHERE g.kind = 'newapi_supplier' AND c.created_here = 1 ${scope}`,
+        scopeParams,
+      )) as Row[]);
   const supplierMeta = new Map(supplierChannels.map((row) => [String(row.id), row]));
-  const supplierRows = (await supplierBillRows(supplierChannels, billDay, db)).map((row) => {
+  const built = supplier ? supplierRowsFromCache(supplierChannels, billDay, supplier) : await supplierBillRows(supplierChannels, billDay, db);
+  const supplierRows = built.map((row) => {
     const source = supplierMeta.get(String(row.channel_id));
     return source
       ? { ...row, upstream_id: source.upstream_id, gateway_disabled: source.gateway_disabled, gateway_base: source.gateway_base }
@@ -732,6 +837,7 @@ async function adoptNullDedupDay(billDay: string): Promise<void> {
     );
     if (!stamped.length) throw new Error("dedup stamp lost");
   });
+  dropPublishedDay(billDay);
 }
 
 /**
@@ -744,38 +850,20 @@ async function freezeBillMembership(billDay: string): Promise<void> {
   for (const [channelId, role] of roles) {
     await dbRun("INSERT INTO billing_membership (bill_day, channel_id, role) VALUES (?, ?, ?)", [billDay, channelId, role]);
   }
+  dropPublishedDay(billDay);
 }
 
 
 /** 源 C 行：billDay 与次日两张 0 点快照的 USD 差（billing-pluggable §4/§9）。金额乘 QUOTA_PER_DOLLAR 入 consumption，沿用下游额度→美元格式化。 */
-async function supplierBillRows(channels: Row[], billDay: string, db: SqlRead = globalRead): Promise<Row[]> {
-  if (!channels.length) return [];
-  const { addDays } = await import("./shanghai");
+function supplierRowsFromCache(channels: Row[], billDay: string, cache: Pick<SupplierCache, "snapsByChannel" | "firstBy">): Row[] {
   const nextDay = addDays(billDay, 1);
-  const ids = channels.map((channel) => String(channel.id));
-  const placeholders = ids.map(() => "?").join(",");
-  const snaps = (await db.all(
-    `SELECT channel_id, day, quality, amount, fx_rate, upstream_source FROM billing_snapshots
-     WHERE source_id = 'customer_billing' AND day IN (?, ?) AND channel_id IN (${placeholders})`,
-    [billDay, nextDay, ...ids],
-  )) as Row[];
-  const byChannel = new Map<string, { today?: Row; next?: Row; firstDay?: string }>();
-  const firstDays = (await db.all(
-    `SELECT channel_id, MIN(day) AS first_day FROM billing_snapshots WHERE source_id = 'customer_billing' AND channel_id IN (${placeholders}) GROUP BY channel_id`,
-    ids,
-  )) as Row[];
-  const firstBy = new Map(firstDays.map((row) => [String(row.channel_id), String(row.first_day)]));
-  for (const snap of snaps) {
-    const entry = byChannel.get(String(snap.channel_id)) ?? {};
-    if (String(snap.day) === billDay) entry.today = snap;
-    if (String(snap.day) === nextDay) entry.next = snap;
-    byChannel.set(String(snap.channel_id), entry);
-  }
   const out: Row[] = [];
   for (const channel of channels) {
     const id = String(channel.id);
-    const entry = byChannel.get(id) ?? {};
-    const first = firstBy.get(id);
+    const snaps = cache.snapsByChannel.get(id) ?? [];
+    const todaySnap = snaps.find((snap) => String(snap.day) === billDay);
+    const nextSnap = snaps.find((snap) => String(snap.day) === nextDay);
+    const first = cache.firstBy.get(id);
     const base = {
       channel_id: id,
       name: channel.name,
@@ -800,7 +888,7 @@ async function supplierBillRows(channels: Row[], billDay: string, db: SqlRead = 
     const toReading = (row: Row | undefined) =>
       row
         ? {
-            quality: String(row.quality) as import("./billing-math").BillingQuality,
+            quality: String(row.quality) as BillingQuality,
             amount: row.amount === null || row.amount === undefined ? null : Number(row.amount),
             unit: "usd" as const,
             fxRate: row.fx_rate === null || row.fx_rate === undefined ? null : Number(row.fx_rate),
@@ -808,14 +896,13 @@ async function supplierBillRows(channels: Row[], billDay: string, db: SqlRead = 
             pulledAt: 0,
           }
         : null;
-    const { dailyDiff } = await import("./billing-math");
-    const diff = dailyDiff(toReading(entry.today), toReading(entry.next));
+    const diff = dailyDiff(toReading(todaySnap), toReading(nextSnap));
     if (diff.quality !== "ok" || diff.amount === null) {
       out.push({ ...base, kind: "unsynced", consumption: null, quality: diff.quality, finding: "" });
       continue;
     }
-    const todayAmount = Number((entry.next as Row).amount) * QUOTA_PER_DOLLAR;
-    const cumulative = Number((entry.next as Row).amount) * QUOTA_PER_DOLLAR;
+    const todayAmount = Number((nextSnap as Row).amount) * QUOTA_PER_DOLLAR;
+    const cumulative = Number((nextSnap as Row).amount) * QUOTA_PER_DOLLAR;
     out.push({
       ...base,
       kind: "amount",
@@ -828,6 +915,78 @@ async function supplierBillRows(channels: Row[], billDay: string, db: SqlRead = 
     });
   }
   return out;
+}
+
+async function supplierBillRows(channels: Row[], billDay: string, db: SqlRead = globalRead): Promise<Row[]> {
+  if (!channels.length) return [];
+  const nextDay = addDays(billDay, 1);
+  const ids = channels.map((channel) => String(channel.id));
+  const placeholders = ids.map(() => "?").join(",");
+  const snaps = (await db.all(
+    `SELECT channel_id, day, quality, amount, fx_rate, upstream_source FROM billing_snapshots
+     WHERE source_id = 'customer_billing' AND day IN (?, ?) AND channel_id IN (${placeholders})`,
+    [billDay, nextDay, ...ids],
+  )) as Row[];
+  const firstDays = (await db.all(
+    `SELECT channel_id, MIN(day) AS first_day FROM billing_snapshots WHERE source_id = 'customer_billing' AND channel_id IN (${placeholders}) GROUP BY channel_id`,
+    ids,
+  )) as Row[];
+  const snapsByChannel = new Map<string, Row[]>();
+  for (const snap of snaps) {
+    const id = String(snap.channel_id);
+    const list = snapsByChannel.get(id) ?? [];
+    list.push(snap);
+    snapsByChannel.set(id, list);
+  }
+  return supplierRowsFromCache(channels, billDay, {
+    snapsByChannel,
+    firstBy: new Map(firstDays.map((row) => [String(row.channel_id), String(row.first_day)])),
+  });
+}
+
+/** One snapshot read for every day in the chart window, instead of a query per day. */
+async function loadSupplierCache(scope: string, scopeParams: unknown[], days: string[], db: SqlRead = globalRead): Promise<SupplierCache> {
+  const idRows = (await db.all(
+    `SELECT c.id FROM channels c JOIN gateways g ON g.id = c.gateway_id WHERE g.kind = 'newapi_supplier' AND c.created_here = 1`,
+  )) as { id: string }[];
+  const channels = (await db.all(
+    `SELECT c.id, c.name, c.group_name, c.type, u.name AS creator_name, c.imported_at, c.upstream_id, c.used_quota, c.balance,
+            COALESCE(g.disabled, 0) AS gateway_disabled, g.base_url AS gateway_base
+     FROM channels c JOIN gateways g ON g.id = c.gateway_id LEFT JOIN users u ON u.id = c.creator_user_id
+     WHERE g.kind = 'newapi_supplier' AND c.created_here = 1 ${scope}`,
+    scopeParams,
+  )) as Row[];
+  const snapsByChannel = new Map<string, Row[]>();
+  const firstBy = new Map<string, string>();
+  if (channels.length && days.length) {
+    const needed = new Set<string>();
+    for (const day of days) {
+      needed.add(day);
+      needed.add(addDays(day, 1));
+    }
+    const dayList = [...needed];
+    const channelIds = channels.map((channel) => String(channel.id));
+    const dayPh = dayList.map(() => "?").join(",");
+    const idPh = channelIds.map(() => "?").join(",");
+    const snaps = (await db.all(
+      `SELECT channel_id, day, quality, amount, fx_rate, upstream_source FROM billing_snapshots
+       WHERE source_id = 'customer_billing' AND day IN (${dayPh}) AND channel_id IN (${idPh})`,
+      [...dayList, ...channelIds],
+    )) as Row[];
+    for (const snap of snaps) {
+      const id = String(snap.channel_id);
+      const list = snapsByChannel.get(id) ?? [];
+      list.push(snap);
+      snapsByChannel.set(id, list);
+    }
+    const firstDays = (await db.all(
+      `SELECT channel_id, MIN(day) AS first_day FROM billing_snapshots
+       WHERE source_id = 'customer_billing' AND channel_id IN (${idPh}) GROUP BY channel_id`,
+      channelIds,
+    )) as Row[];
+    for (const row of firstDays) firstBy.set(String(row.channel_id), String(row.first_day));
+  }
+  return { ids: new Set(idRows.map((row) => String(row.id))), channels, snapsByChannel, firstBy };
 }
 
 export async function billingView(actor: SessionUser, options: BillingViewOptions = {}) {
@@ -900,17 +1059,44 @@ export async function billingView(actor: SessionUser, options: BillingViewOption
     const list = runsByDay.get(day) ?? [];
     return publishedRun(list) ?? list.find((run) => String(run.status) !== "published") ?? list[0];
   };
-  const assembled = new Map<string, DayAssembly>();
-  for (const day of [...runsByDay.keys()].sort()) {
-    assembled.set(day, await assembleDay(day, scope, scopeParams, runFor(day), rolesByDay.get(day) ?? null));
+  const allDays = [...runsByDay.keys()].sort();
+  const trendDays = allDays.slice(-TREND_WINDOW_DAYS);
+  const daysNeeded = new Set(trendDays);
+  if (billDay) daysNeeded.add(billDay);
+  const assembled = new Map<string, DayAssembly | CachedDay>();
+  const misses: string[] = [];
+  for (const day of [...daysNeeded].sort()) {
+    const run = runFor(day);
+    const published = Boolean(run && String(run.status) === "published");
+    const hit = published && day !== billDay
+      ? publishedDayCache.get(publishedCacheKey(day, run?.aggregation, scope, scopeParams))
+      : undefined;
+    if (hit) assembled.set(day, hit);
+    else misses.push(day);
   }
-  const current = billDay ? assembled.get(billDay) : undefined;
+  const supplier = await loadSupplierCache(scope, scopeParams, misses);
+  for (const day of misses) {
+    const run = runFor(day);
+    const assembly = await assembleDay(day, scope, scopeParams, run, rolesByDay.get(day) ?? null, supplier);
+    assembled.set(day, assembly);
+    if (run && String(run.status) === "published") {
+      publishedDayCache.set(publishedCacheKey(day, run.aggregation, scope, scopeParams), {
+        cached: true,
+        legacy: assembly.legacy,
+        unpublished: assembly.unpublished,
+        total: assembly.total,
+        span: spanOf(assembly.preferred),
+      });
+    }
+  }
+  const found = billDay ? assembled.get(billDay) : undefined;
+  const current = found && !isCachedDay(found) ? found : undefined;
   const rows = current?.storedRows ?? [];
   const merged = current?.merged ?? [];
   const legacy = current ? current.legacy : mode === "legacy";
   const preferred = current?.preferred ?? [];
   const excluded = current?.excluded ?? [];
-  const dayTotal = current?.total ?? summarizeDay([]);
+  const dayTotal = current?.total ?? summarizeDay([], false);
   const visible = unsyncedOnly ? preferred.filter((row) => row.kind !== "amount") : preferred;
   const markers = billDay ? await rebindMarkers(visible.map((row) => String(row.channel_id)), billDay) : new Map();
   const unsynced = preferred.filter((row) => row.kind !== "amount");
@@ -937,12 +1123,19 @@ export async function billingView(actor: SessionUser, options: BillingViewOption
       )) as { channel_id: string }[]).map((row) => row.channel_id)
     : [];
   const preferredIds = new Set(preferred.map((row) => String(row.channel_id)));
-  const reading = {
-    channels: dayTotal.channels,
-    readings: dayTotal.readings,
-    consumption: dayTotal.value,
-    complete: dayTotal.complete,
-  };
+  const reading = dayTotal.legacy
+    ? {
+        channels: dayTotal.channels,
+        readings: dayTotal.readings,
+        consumption: dayTotal.readings > 0 ? dayTotal.consumption : null,
+        complete: dayTotal.channels > 0 && dayTotal.readings === dayTotal.channels,
+      }
+    : {
+        channels: dayTotal.channels,
+        readings: dayTotal.readings,
+        consumption: dayTotal.value,
+        complete: dayTotal.complete,
+      };
   return {
     copy: "schedule",
     requestedDay: requested || null,
@@ -965,7 +1158,7 @@ export async function billingView(actor: SessionUser, options: BillingViewOption
     incomplete: unsynced.length > 0,
     disabledGateway,
     reading,
-    totalConsumption: dayTotal.value ?? 0,
+    totalConsumption: dayTotal.consumption,
     totalTestQuota: balanceRows.reduce((sum, row) => sum + Number(row.test_quota ?? 0), 0),
     showTestLine: rows.some((row) => (legacy || preferredIds.has(String(row.channel_id))) && String(row.billing_mode ?? "") !== "snapshot"),
     remainingBalance: balanceRows.reduce((sum, row) => sum + (row.balance === null || row.balance === undefined ? 0 : Number(row.balance)), 0),
@@ -974,29 +1167,32 @@ export async function billingView(actor: SessionUser, options: BillingViewOption
     bySupplier: groupSlices(preferred, nameOf("creator_name"), legacy),
     byChannel: groupSlices(preferred, nameOf("name"), legacy).slice(0, 8),
     byGroup: groupSlices(preferred, nameOf("group_name"), legacy),
-    trend: [...assembled.entries()].sort((a, b) => a[0].localeCompare(b[0])).map(([day, assembly]) => ({
-      day,
-      label: "",
-      spanDays: 1,
-      value: assembly.total.missing ? null : assembly.total.value,
-      span: false,
-      missing: assembly.total.missing,
-      unpublished: assembly.unpublished,
-    })),
+    trend: trendDays.flatMap((day) => {
+      const assembly = assembled.get(day);
+      if (!assembly) return [];
+      const span = isCachedDay(assembly) ? assembly.span : spanOf(assembly.preferred);
+      return [{
+        day,
+        label: span.label,
+        spanDays: span.spanDays,
+        value: assembly.total.missing ? null : assembly.total.value,
+        span: span.span,
+        missing: assembly.total.missing,
+        partial: assembly.total.partial,
+        unpublished: assembly.unpublished,
+        legacy: assembly.legacy,
+        readings: assembly.total.readings,
+        channels: assembly.total.channels,
+        complete: assembly.total.complete,
+      }];
+    }),
     rows: visible.map((row) => ({
       id: String(row.channel_id),
       name: String(row.name ?? ""),
       group: String(row.group_name ?? ""),
       supplier: String(row.creator_name ?? "") || "unknown",
       consumption: row.consumption === null || row.consumption === undefined ? null : Number(row.consumption),
-      today:
-        String(row.billing_mode ?? "") === "snapshot"
-          ? row.consumption === null || row.consumption === undefined
-            ? null
-            : Number(row.consumption)
-          : row.today_quota === null || row.today_quota === undefined
-            ? null
-            : Number(row.today_quota),
+      today: rowToday(row),
       billingMode: String(row.billing_mode ?? ""),
       quality: String(row.quality ?? ""),
       imported: String(row.origin ?? "") === "imported",

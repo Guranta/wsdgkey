@@ -3,7 +3,7 @@
 import { BillDayControl, BillPeriod, billFindingText, billLabelText, readingsNote, useBillingBill, type BillRow } from "@/components/billing-view";
 import { useConnections } from "@/components/providers";
 import { Alert, buttonClass, Card, PageHeader } from "@/components/ui";
-import { grandTotalLabel, groupSubtotalText, readingAmountText, trendWindowAllZero } from "@/lib/billing-query";
+import { columnSummary, columnTotalText, grandTotalLabel, groupSubtotalText, readingAmountText, trendHoverTitle, trendWindowAllZero } from "@/lib/billing-query";
 import { channelTypeOption } from "@/lib/channel-types";
 import { formatUsd } from "@/lib/format";
 import { formatShanghaiTime } from "@/lib/shanghai";
@@ -24,14 +24,8 @@ export function BillsView() {
   const money = (value: number) => formatUsd(value, locale);
   const cell = (value: number | null) => (value === null ? "—" : money(value));
   const dedup = bill.aggregation === "dedup";
-  const summed = (rows: BillRow[], key: "today" | "before" | "cumulative") => {
-    const values = rows.map((row) => row[key]);
-    const present = values.filter((value): value is number => value !== null && value !== undefined);
-    const missing = values.some((value) => value === null || value === undefined);
-    if (missing && present.length === 0) return t("missingData");
-    const amount = present.reduce((total, value) => total + value, 0);
-    return missing ? `${money(amount)} · ${t("incomplete")}` : money(amount);
-  };
+  const summed = (rows: BillRow[], key: "today" | "before" | "cumulative") =>
+    columnTotalText(columnSummary(rows.map((row) => row[key])), money, t("missingData"), t("incomplete"));
   const groupToday = (rows: BillRow[]) =>
     dedup ? groupSubtotalText(rows, money, t("missingData"), readingsNote(t)) : summed(rows, "today");
   const unpublished = bill.publication === "unpublished" || (Boolean(bill.requestedDay) && !bill.billDay);
@@ -87,20 +81,27 @@ export function BillsView() {
       <Card className="mb-4 p-4">
         <h2 className="text-sm font-semibold">{t("trend")}</h2>
         <div className="mt-4 flex h-36 items-stretch gap-2 overflow-x-auto">
-          {bill.trend.length === 0 ? <p className="text-sm text-muted">{t("noTrend")}</p> : bill.trend.map((item) => (
-            <div key={`${item.day}-${item.label}`} className="flex h-full min-w-8 flex-1 flex-col items-center justify-end gap-1">
+          {bill.trend.length === 0 ? <p className="text-sm text-muted">{t("noTrend")}</p> : bill.trend.map((item) => {
+            const title = trendHoverTitle(item, money, t("missingData"), t("incomplete"), readingsNote(t));
+            const hollow = "w-full rounded-full border border-dashed border-[#007AFF] bg-transparent";
+            return (
+            <div key={`${item.day}-${item.label}`} title={title} className="flex h-full min-w-8 flex-1 flex-col items-center justify-end gap-1">
               <div className="flex min-h-0 w-full flex-1 flex-col justify-end">
                 {item.missing ? (
                   <span className="pb-1 text-center text-[10px] text-muted">{t("missingData")}</span>
                 ) : item.value === 0 ? (
-                  <div className="h-px w-full bg-[#8E8E93]" />
+                  <div className={item.unpublished ? "h-0.5 w-full border border-dashed border-[#007AFF] bg-transparent" : "h-0.5 w-full bg-[#007AFF]"} />
+                ) : item.unpublished ? (
+                  <div className={hollow} style={{ height: `${(Number(item.value) / max) * 100}%` }} />
                 ) : (
-                  <div className="w-full rounded-full" style={{ height: `${(Number(item.value) / max) * 100}%`, background: item.unpublished ? "#FF9500" : "#007AFF" }} />
+                  <div className="w-full rounded-full bg-[#007AFF]" style={{ height: `${(Number(item.value) / max) * 100}%` }} />
                 )}
               </div>
-              <span className={`whitespace-nowrap text-[10px] ${item.unpublished ? "font-semibold text-warn" : "text-muted"}`}>{item.unpublished ? t("unpublishedTrend") : item.span ? billLabelText(t, item) : item.day.slice(5)}</span>
+              <span className="whitespace-nowrap text-[10px] text-muted">{item.span ? billLabelText(t, item) : item.day.slice(5)}</span>
+              {item.unpublished ? <span className="whitespace-nowrap text-[10px] text-muted">{t("unpublishedTrend")}</span> : null}
             </div>
-          ))}
+            );
+          })}
         </div>
         {allZero ? <p className="mt-2 text-xs text-muted">{t("trendAllZero")}</p> : null}
       </Card>
@@ -166,7 +167,7 @@ export function BillsView() {
                   </tr>
                   <tr className="border-t border-line font-semibold">
                     <td className="px-4 py-3">{grandTotalLabel(bill.aggregation, Boolean(bill.incomplete), t("grandTotal"), t("incomplete"))}</td>
-                    <td className="whitespace-nowrap px-4 py-3 tabular-nums">{readingAmountText(bill.reading, money, t("missingData"), readingsNote(t))}</td>
+                    <td className="whitespace-nowrap px-4 py-3 tabular-nums">{groupToday(allRows)}</td>
                     <td className="whitespace-nowrap px-4 py-3 tabular-nums">{summed(allRows, "before")}</td>
                     <td className="whitespace-nowrap px-4 py-3 tabular-nums">{summed(allRows, "cumulative")}</td>
                   </tr>

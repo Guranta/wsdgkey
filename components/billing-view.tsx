@@ -79,7 +79,20 @@ type Bill = {
   bySupplier: Slice[];
   byChannel: Slice[];
   byGroup: Slice[];
-  trend: { day: string; label: string; spanDays: number; value: number | null; span: boolean; missing?: boolean; unpublished?: boolean }[];
+  trend: {
+    day: string;
+    label: string;
+    spanDays: number;
+    value: number | null;
+    span: boolean;
+    missing?: boolean;
+    partial?: boolean;
+    unpublished?: boolean;
+    legacy?: boolean;
+    readings?: number;
+    channels?: number;
+    complete?: boolean;
+  }[];
   rows: BillRow[];
 };
 export type { Bill, BillRow };
