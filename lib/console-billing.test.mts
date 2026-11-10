@@ -4,7 +4,7 @@ import http from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { billingPickerDay, billingRequestQuery, disabledGatewayAmountText, grandTotalLabel, groupSubtotalText, readingAmountText, rollupReadingValues } from "./billing-query.ts";
+import { billingPickerDay, billingRequestQuery, columnSummary, columnTotalText, disabledGatewayAmountText, grandTotalLabel, groupSubtotalText, readingAmountText, rollupReadingValues, trendHoverTitle, trendWindowAllZero } from "./billing-query.ts";
 import { formatUsd } from "./format.ts";
 
 const dir = mkdtempSync(path.join(tmpdir(), "newapi-console-billing-"));
@@ -59,11 +59,11 @@ test("a picked bill day is sent, and the picker shows the loaded day", () => {
   assert.equal(rollupReadingValues([{ kind: "amount", consumption: Number.NaN }]).readings, 0);
   const zh = JSON.parse(readFileSync(new URL("../messages/zh-CN.json", import.meta.url), "utf8")) as {
     channels: { confirmedAt: string; pendingConfirm: string };
-    billing: { incompleteReadings: string; unpublishedHint: string };
+    billing: { incompleteReadings: string; unpublishedHint: string; disabledGatewayExcludedCount: string; trendAllZero: string; unpublishedTrend: string };
   };
   const en = JSON.parse(readFileSync(new URL("../messages/en.json", import.meta.url), "utf8")) as {
     channels: { confirmedAt: string; pendingConfirm: string };
-    billing: { incompleteReadings: string; unpublishedHint: string };
+    billing: { incompleteReadings: string; unpublishedHint: string; disabledGatewayExcludedCount: string; trendAllZero: string; unpublishedTrend: string };
   };
   assert.equal(zh.billing.incompleteReadings, "不完整（{readings}/{channels} 有读数）");
   assert.equal(en.billing.incompleteReadings, "incomplete ({readings}/{channels} with readings)");
@@ -74,6 +74,43 @@ test("a picked bill day is sent, and the picker shows the loaded day", () => {
   assert.equal(grandTotalLabel("legacy", true, "合计", "不完整"), "合计 · 不完整");
   assert.equal(grandTotalLabel("legacy", false, "合计", "不完整"), "合计");
   assert.equal(grandTotalLabel(undefined, true, "合计", "不完整"), "合计 · 不完整");
+  assert.equal(trendWindowAllZero([{ value: 0 }, { value: 0, missing: false }]), true);
+  assert.equal(trendWindowAllZero([{ value: 0 }, { value: null, missing: true }]), false);
+  assert.equal(trendWindowAllZero([{ value: null, missing: true }]), false);
+  assert.equal(trendWindowAllZero([{ value: 0, partial: true }]), false);
+  assert.equal(trendWindowAllZero([]), false);
+  const legacyPartial = columnSummary([0, null]);
+  assert.equal(columnTotalText(legacyPartial, (value) => formatUsd(value, "zh-CN"), "缺数据", "不完整"), "$0.00 · 不完整");
+  assert.equal(columnTotalText(columnSummary([34_860_000, 0]), (value) => formatUsd(value, "zh-CN"), "缺数据", "不完整"), "$69.72");
+  assert.equal(columnTotalText(columnSummary([null, null]), () => "$0.00", "缺数据", "不完整"), "缺数据");
+  assert.equal(
+    trendHoverTitle({ day: "2026-11-09", legacy: true, value: 0, missing: false, partial: true }, (value) => formatUsd(value, "zh-CN"), "缺数据", "不完整", zhNote),
+    "11-09 · $0.00 · 不完整",
+  );
+  assert.equal(
+    trendHoverTitle({ day: "2026-11-10", value: 0, missing: false, channels: 635, readings: 4, complete: false }, (value) => formatUsd(value, "zh-CN"), "缺数据", "不完整", zhNote),
+    "11-10 · $0.00 · 不完整（4/635 有读数）",
+  );
+  assert.equal(
+    trendHoverTitle({ day: "2026-11-08", legacy: true, value: null, missing: true }, (value) => formatUsd(value, "zh-CN"), "缺数据", "不完整", zhNote),
+    "11-08 · 缺数据",
+  );
+  assert.equal(
+    trendHoverTitle(
+      { day: "2026-11-07", label: "11-05–11-07", span: true, legacy: true, value: 500, missing: false, partial: false },
+      (value) => `$${value}`,
+      "缺数据",
+      "不完整",
+      zhNote,
+    ),
+    "11-05–11-07 · $500",
+  );
+  assert.equal(zh.billing.disabledGatewayExcludedCount, "已停用网关（不计入合计）· {count} 个渠道");
+  assert.equal(en.billing.disabledGatewayExcludedCount, "Disabled gateways (excluded from total) · {count} channels");
+  assert.equal(zh.billing.trendAllZero, "这段时间每天都是 $0");
+  assert.equal(en.billing.trendAllZero, "Every day in this period is $0");
+  assert.equal(zh.billing.unpublishedTrend, "未发布");
+  assert.equal(en.billing.unpublishedTrend, "Unpublished");
   assert.equal(zh.channels.confirmedAt, "最近确认于 {when}");
   assert.equal(zh.channels.pendingConfirm, "待确认");
   assert.equal(en.channels.confirmedAt, "Last confirmed {when}");
@@ -81,15 +118,17 @@ test("a picked bill day is sent, and the picker shows the loaded day", () => {
 });
 
 async function freshDb() {
-  const { resetDatabaseForTests, dbGet, dbRun, dbAll, ensureReady } = await import("./db.ts");
+  const { resetDatabaseForTests, dbGet, dbRun, dbAll, dbTransaction, ensureReady } = await import("./db.ts");
+  const { clearPublishedDayCache } = await import("./billing-service.ts");
   const { resetSecretKeyForTests } = await import("./secret-box.ts");
   resetSecretKeyForTests();
+  clearPublishedDayCache();
   resetDatabaseForTests();
   await ensureReady();
   for (const table of ["billing_membership", "billing_rows", "billing_runs", "billing_attempts", "channel_bindings", "channels", "gateways", "recon_periods"]) {
     await dbRun(`DELETE FROM ${table}`);
   }
-  return { dbGet, dbRun, dbAll };
+  return { dbGet, dbRun, dbAll, dbTransaction };
 }
 
 test("overview counts do not let a missing row count as pull, throttle, or unsynced", async () => {
@@ -807,8 +846,8 @@ test("publishBill freezes the new rules for an unpublished day and leaves an alr
   assert.equal(String((await dbGet("SELECT aggregation FROM billing_runs WHERE baseline_day = '2026-11-12'"))?.aggregation), "dedup");
 });
 
-function trendTotal(bill: { trend: { day: string; value: number }[] }, day: string) {
-  return bill.trend.filter((item) => item.day === day).reduce((sum, item) => sum + item.value, 0);
+function trendTotal(bill: { trend: { day: string; value: number | null; missing?: boolean }[] }, day: string) {
+  return bill.trend.filter((item) => item.day === day && !item.missing).reduce((sum, item) => sum + (item.value ?? 0), 0);
 }
 
 test("the trend uses the same per-day rule as the bill", async () => {
@@ -829,19 +868,19 @@ test("the trend uses the same per-day rule as the bill", async () => {
     ["tr-copy", "tr-off", 10],
     ["tr-only", "tr-off", 11],
   ];
-  for (const [id, gatewayId, upstream] of channels) {
-    await dbRun(
-      `INSERT INTO channels (
-        id, gateway_id, upstream_id, creator_user_id, name, type, group_name, status, created_at, updated_at, created_here
-      ) VALUES (?, ?, ?, ?, ?, 41, 'vertex', 1, ?, ?, 1)`,
-      [id, gatewayId, upstream, admin.id, id, now, now],
-    );
-  }
   const amounts: [string, number][] = [
     ["tr-keep", 100],
     ["tr-copy", 40],
     ["tr-only", 70],
   ];
+  for (const [id, gatewayId, upstream] of channels) {
+    await dbRun(
+      `INSERT INTO channels (
+        id, gateway_id, upstream_id, creator_user_id, name, type, group_name, status, created_at, updated_at, created_here, today_quota
+      ) VALUES (?, ?, ?, ?, ?, 41, 'vertex', 1, ?, ?, 1, ?)`,
+      [id, gatewayId, upstream, admin.id, id, now, now, amounts.find((item) => item[0] === id)?.[1] ?? 0],
+    );
+  }
   for (const day of ["2026-11-08", "2026-11-09"]) {
     for (const [id, consumption] of amounts) {
       await dbRun(
@@ -987,12 +1026,12 @@ async function seedCutoffChannels(
     ["cut-copy", "cut-off", 10, 40],
     ["cut-only", "cut-off", 11, 70],
   ];
-  for (const [id, gatewayId, upstream] of channels) {
+  for (const [id, gatewayId, upstream, amount] of channels) {
     await dbRun(
       `INSERT INTO channels (
-        id, gateway_id, upstream_id, creator_user_id, name, type, group_name, status, created_at, updated_at, created_here
-      ) VALUES (?, ?, ?, ?, ?, 41, 'vertex', 1, ?, ?, 1)`,
-      [id, gatewayId, upstream, adminId, id, now, now],
+        id, gateway_id, upstream_id, creator_user_id, name, type, group_name, status, created_at, updated_at, created_here, today_quota
+      ) VALUES (?, ?, ?, ?, ?, 41, 'vertex', 1, ?, ?, 1, ?)`,
+      [id, gatewayId, upstream, adminId, id, now, now, amount],
     );
   }
   for (const day of days) {
@@ -1113,4 +1152,524 @@ test("the trend stamps 2026-11-10 and leaves 2026-11-09 on the stored rows", asy
   assert.equal(trendTotal(again, "2026-11-09"), 210);
   assert.equal(trendTotal(again, "2026-11-10"), 100);
   assert.equal((await dbGet("SELECT aggregation FROM billing_runs WHERE bill_day = '2026-11-09'"))?.aggregation ?? null, null);
+});
+
+test("a rolled-back transaction does not undo a write made outside it", async () => {
+  const { dbGet, dbRun, dbTransaction } = await freshDb();
+  await dbRun("CREATE TABLE IF NOT EXISTS tx_probe (id TEXT PRIMARY KEY)");
+  let opened!: () => void;
+  const inside = new Promise<void>((resolve) => {
+    opened = resolve;
+  });
+  const txn = dbTransaction(async (tx) => {
+    await tx.run("INSERT INTO tx_probe (id) VALUES ('inside')");
+    opened();
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    throw new Error("boom");
+  });
+  await inside;
+  await Promise.race([
+    dbRun("INSERT INTO tx_probe (id) VALUES ('outside')"),
+    new Promise((_, reject) => setTimeout(() => reject(new Error("outside write blocked")), 2000)),
+  ]);
+  await assert.rejects(txn, /boom/);
+  assert.equal(String((await dbGet("SELECT id FROM tx_probe WHERE id = 'outside'"))?.id), "outside");
+  assert.equal((await dbGet("SELECT id FROM tx_probe WHERE id = 'inside'")) ?? null, null);
+});
+
+test("a trend day with no reading is missing, and an all-zero window is flagged", async () => {
+  const { dbRun } = await freshDb();
+  const { authenticate } = await import("./users.ts");
+  const { billingView } = await import("./billing-service.ts");
+  const admin = await authenticate("admin", "admin-pass-123");
+  if (typeof admin !== "object") throw new Error("admin");
+  const now = Date.now();
+  await dbRun(
+    `INSERT INTO gateways (id, name, base_url, token_cipher, admin_user_id, demo, created_at, updated_at, disabled)
+     VALUES ('tr0', 'on', 'https://zero.example', '', '1', 0, ?, ?, 0)`,
+    [now, now],
+  );
+  await dbRun(
+    `INSERT INTO channels (
+      id, gateway_id, upstream_id, creator_user_id, name, type, group_name, status, created_at, updated_at, created_here, today_quota
+    ) VALUES ('z0', 'tr0', 1, ?, 'z0', 1, 'pool', 1, ?, ?, 1, 0),
+             ('zmiss', 'tr0', 2, ?, 'zmiss', 1, 'pool', 1, ?, ?, 1, NULL)`,
+    [admin.id, now, now, admin.id, now, now],
+  );
+  await dbRun(
+    `INSERT INTO billing_rows (id, bill_day, channel_id, start_day, end_day, span_days, kind, consumption)
+     VALUES ('a', '2026-11-07', 'z0', '2026-11-07', '2026-11-07', 1, 'amount', 0),
+            ('b', '2026-11-08', 'z0', '2026-11-08', '2026-11-08', 1, 'amount', 0),
+            ('c', '2026-11-06', 'zmiss', '2026-11-06', '2026-11-06', 1, 'amount', NULL)`,
+  );
+  await dbRun(
+    `INSERT INTO billing_runs (baseline_day, bill_day, status, started_at, published_at)
+     VALUES ('2026-11-08', '2026-11-07', 'published', ?, ?),
+            ('2026-11-09', '2026-11-08', 'published', ?, ?),
+            ('2026-11-07', '2026-11-06', 'published', ?, ?)`,
+    [now, now, now, now, now, now],
+  );
+  const bill = await billingView(admin, { day: "2026-11-08" });
+  const zeros = bill.trend.filter((item) => item.day === "2026-11-07" || item.day === "2026-11-08");
+  const missing = bill.trend.find((item) => item.day === "2026-11-06");
+  assert.equal(zeros.length, 2);
+  assert.ok(zeros.every((item) => item.missing === false && item.value === 0));
+  assert.equal(trendWindowAllZero(zeros), true);
+  assert.ok(missing);
+  assert.equal(missing.missing, true);
+  assert.equal(missing.value, null);
+  assert.notEqual(missing.value, 0);
+  assert.equal(trendWindowAllZero(bill.trend), false);
+});
+
+test("each trend day matches that day's bill total, including supplier snapshots", async () => {
+  const { dbRun } = await freshDb();
+  const { authenticate } = await import("./users.ts");
+  const { billingView } = await import("./billing-service.ts");
+  const admin = await authenticate("admin", "admin-pass-123");
+  if (typeof admin !== "object") throw new Error("admin");
+  const now = Date.now();
+  await dbRun(
+    `INSERT INTO gateways (id, name, base_url, token_cipher, admin_user_id, demo, created_at, updated_at, disabled, kind)
+     VALUES ('ad-on', 'on', 'https://admin.example', '', '1', 0, ?, ?, 0, 'newapi_admin'),
+            ('ad-off', 'off', 'https://admin.example/v1', '', '1', 0, ?, ?, 1, 'newapi_admin'),
+            ('sup-gw', 'supplier', 'https://supplier.example', '', '1', 0, ?, ?, 0, 'newapi_supplier')`,
+    [now, now, now, now, now, now],
+  );
+  const admins: [string, string, number, number][] = [
+    ["ad-keep", "ad-on", 10, 100],
+    ["ad-copy", "ad-off", 10, 40],
+    ["ad-only", "ad-off", 11, 70],
+  ];
+  for (const [id, gatewayId, upstream] of admins) {
+    await dbRun(
+      `INSERT INTO channels (
+        id, gateway_id, upstream_id, creator_user_id, name, type, group_name, status, created_at, updated_at, created_here
+      ) VALUES (?, ?, ?, ?, ?, 1, 'pool', 1, ?, ?, 1)`,
+      [id, gatewayId, upstream, admin.id, id, now, now],
+    );
+  }
+  await dbRun(
+    `INSERT INTO channels (
+      id, gateway_id, upstream_id, creator_user_id, name, type, group_name, status, created_at, updated_at, created_here
+    ) VALUES ('sup', 'sup-gw', 1, ?, 'sup', 1, 'pool', 1, ?, ?, 1)`,
+    [admin.id, now, now],
+  );
+  for (const day of ["2026-11-09", "2026-11-10"]) {
+    for (const [id, , , amount] of admins) {
+      await dbRun(
+        `INSERT INTO billing_rows (id, bill_day, channel_id, start_day, end_day, span_days, kind, consumption)
+         VALUES (?, ?, ?, ?, ?, 1, 'amount', ?)`,
+        [`${day}:${id}`, day, id, day, day, amount],
+      );
+    }
+  }
+  for (const [day, amount] of [
+    ["2026-11-09", 0],
+    ["2026-11-10", 2],
+    ["2026-11-11", 4],
+    ["2026-11-12", 6],
+  ] as const) {
+    await dbRun(
+      `INSERT INTO billing_snapshots (channel_id, day, source_id, quality, amount, unit, pulled_at)
+       VALUES ('sup', ?, 'customer_billing', 'ok', ?, 'usd', ?)`,
+      [day, amount, now],
+    );
+  }
+  await dbRun(
+    `INSERT INTO billing_runs (baseline_day, bill_day, status, started_at, published_at)
+     VALUES ('2026-11-09', '2026-11-08', 'published', ?, ?),
+            ('2026-11-10', '2026-11-09', 'published', ?, ?),
+            ('2026-11-11', '2026-11-10', 'published', ?, ?),
+            ('2026-11-12', '2026-11-11', 'collecting', ?, NULL)`,
+    [now, now, now, now, now, now, now],
+  );
+
+  const window = await billingView(admin, { day: "2026-11-09" });
+  const supplierQuota = 2 * 500_000;
+  const money = (value: number) => formatUsd(value, "zh-CN");
+  const note = (readings: number, channels: number) => `不完整（${readings}/${channels} 有读数）`;
+  for (const day of ["2026-11-08", "2026-11-09", "2026-11-10", "2026-11-11"]) {
+    const one = await billingView(admin, { day });
+    const point = window.trend.find((item) => item.day === day);
+    assert.ok(point);
+    if (one.aggregation === "legacy") {
+      const summary = columnSummary(one.rows.map((row) => row.today));
+      assert.equal(point.legacy, true);
+      assert.equal(point.missing, summary.missing);
+      assert.equal(point.partial, summary.partial);
+      assert.equal(point.value, summary.value);
+      assert.equal(trendHoverTitle(point, money, "缺数据", "不完整", note), `${day.slice(5)} · ${columnTotalText(summary, money, "缺数据", "不完整")}`);
+    } else {
+      assert.equal(point.legacy, false);
+      assert.equal(point.missing, one.reading.readings === 0);
+      assert.equal(point.value, one.reading.readings === 0 ? null : one.totalConsumption);
+      assert.equal(trendHoverTitle(point, money, "缺数据", "不完整", note), `${day.slice(5)} · ${readingAmountText(one.reading, money, "缺数据", note)}`);
+    }
+  }
+  const legacy = await billingView(admin, { day: "2026-11-09" });
+  const dedup = await billingView(admin, { day: "2026-11-10" });
+  const open = await billingView(admin, { day: "2026-11-11" });
+  assert.equal(legacy.aggregation, "legacy");
+  assert.equal(legacy.totalConsumption, 210 + supplierQuota);
+  assert.equal(dedup.aggregation, "dedup");
+  assert.equal(dedup.totalConsumption, 100 + supplierQuota);
+  assert.equal(dedup.disabledGateway.consumption, 70);
+  assert.equal(open.publication, "unpublished");
+  assert.equal(open.totalConsumption, supplierQuota);
+  assert.equal(window.trend.find((item) => item.day === "2026-11-11")?.unpublished, true);
+  assert.equal(window.trend.find((item) => item.day === "2026-11-09")?.unpublished, false);
+  assert.equal(window.trend.find((item) => item.day === "2026-11-08")?.missing, true);
+  const legacyPoint = window.trend.find((item) => item.day === "2026-11-09");
+  assert.equal(legacyPoint?.value, supplierQuota);
+  assert.notEqual(legacyPoint?.value, legacy.totalConsumption);
+  assert.equal(trendHoverTitle(legacyPoint!, money, "缺数据", "不完整", note).includes("有读数"), false);
+});
+
+test("a legacy published day keeps the old daily total text", async () => {
+  const { dbRun } = await freshDb();
+  const { authenticate } = await import("./users.ts");
+  const { billingView } = await import("./billing-service.ts");
+  const admin = await authenticate("admin", "admin-pass-123");
+  if (typeof admin !== "object") throw new Error("admin");
+  const now = Date.now();
+  await dbRun(
+    `INSERT INTO gateways (id, name, base_url, token_cipher, admin_user_id, demo, created_at, updated_at, disabled)
+     VALUES ('leg', 'on', 'https://legacy.example', '', '1', 0, ?, ?, 0)`,
+    [now, now],
+  );
+  await dbRun(
+    `INSERT INTO channels (
+      id, gateway_id, upstream_id, creator_user_id, name, type, group_name, status, created_at, updated_at, created_here, today_quota, used_quota
+    ) VALUES ('spent', 'leg', 1, ?, 'spent', 1, 'pool', 1, ?, ?, 1, NULL, 34860000),
+             ('zero', 'leg', 2, ?, 'zero', 1, 'pool', 1, ?, ?, 1, 0, 0)`,
+    [admin.id, now, now, admin.id, now, now],
+  );
+  await dbRun(
+    `INSERT INTO billing_rows (id, bill_day, channel_id, start_day, end_day, span_days, kind, consumption)
+     VALUES ('spent', '2026-11-09', 'spent', '2026-11-09', '2026-11-09', 1, 'amount', 1000),
+            ('zero', '2026-11-09', 'zero', '2026-11-09', '2026-11-09', 1, 'amount', 0)`,
+  );
+  await dbRun(
+    `INSERT INTO billing_runs (baseline_day, bill_day, status, started_at, published_at)
+     VALUES ('2026-11-10', '2026-11-09', 'published', ?, ?)`,
+    [now, now],
+  );
+  const bill = await billingView(admin, { day: "2026-11-09" });
+  const money = (value: number) => formatUsd(value, "zh-CN");
+  const daily = columnTotalText(columnSummary(bill.rows.map((row) => row.today)), money, "缺数据", "不完整");
+  const cumulative = columnTotalText(columnSummary(bill.rows.map((row) => row.cumulative)), money, "缺数据", "不完整");
+  assert.equal(bill.aggregation, "legacy");
+  assert.equal(bill.totalConsumption, 1000);
+  assert.equal(daily, "$0.00 · 不完整");
+  assert.equal(cumulative, "$69.72");
+  const point = bill.trend.find((item) => item.day === "2026-11-09");
+  assert.ok(point);
+  assert.equal(point.legacy, true);
+  assert.equal(point.value, 0);
+  assert.equal(point.partial, true);
+  assert.equal(point.missing, false);
+  assert.equal(trendHoverTitle(point, money, "缺数据", "不完整", (readings, channels) => `不完整（${readings}/${channels} 有读数）`), "11-09 · $0.00 · 不完整");
+  assert.equal(
+    trendHoverTitle(point, (value) => formatUsd(value, "en"), "Missing data", "Incomplete", (readings, channels) => `incomplete (${readings}/${channels} with readings)`),
+    "11-09 · $0.00 · Incomplete",
+  );
+});
+
+test("a multi-day bill is one blue-range bar and matches that day's total", async () => {
+  const { dbRun } = await freshDb();
+  const { authenticate } = await import("./users.ts");
+  const { billingView } = await import("./billing-service.ts");
+  const admin = await authenticate("admin", "admin-pass-123");
+  if (typeof admin !== "object") throw new Error("admin");
+  const now = Date.now();
+  await dbRun(
+    `INSERT INTO gateways (id, name, base_url, token_cipher, admin_user_id, demo, created_at, updated_at, disabled)
+     VALUES ('span', 'on', 'https://span.example', '', '1', 0, ?, ?, 0)`,
+    [now, now],
+  );
+  await dbRun(
+    `INSERT INTO channels (
+      id, gateway_id, upstream_id, creator_user_id, name, type, group_name, status, created_at, updated_at, created_here, today_quota
+    ) VALUES ('span-ch', 'span', 1, ?, 'span', 1, 'pool', 1, ?, ?, 1, 500)`,
+    [admin.id, now, now],
+  );
+  await dbRun(
+    `INSERT INTO billing_rows (id, bill_day, channel_id, start_day, end_day, span_days, label, kind, consumption)
+     VALUES ('span-row', '2026-11-07', 'span-ch', '2026-11-05', '2026-11-07', 3, 'spanN', 'amount', 500)`,
+  );
+  await dbRun(
+    `INSERT INTO billing_runs (baseline_day, bill_day, status, started_at, published_at)
+     VALUES ('2026-11-08', '2026-11-07', 'published', ?, ?)`,
+    [now, now],
+  );
+  const bill = await billingView(admin, { day: "2026-11-07" });
+  assert.equal(bill.trend.length, 1);
+  const point = bill.trend[0];
+  assert.ok(point);
+  assert.equal(point.span, true);
+  assert.equal(point.spanDays, 3);
+  assert.equal(point.label, "11-05–11-07");
+  assert.equal(point.value, columnSummary(bill.rows.map((row) => row.today)).value);
+  assert.equal(point.value, 500);
+  const money = (value: number) => formatUsd(value, "zh-CN");
+  assert.equal(
+    trendHoverTitle(point, money, "缺数据", "不完整", (readings, channels) => `不完整（${readings}/${channels} 有读数）`),
+    `11-05–11-07 · ${columnTotalText(columnSummary(bill.rows.map((row) => row.today)), money, "缺数据", "不完整")}`,
+  );
+});
+
+test("the chart computes at most 30 days", async () => {
+  const { dbRun } = await freshDb();
+  const { authenticate } = await import("./users.ts");
+  const { billingView } = await import("./billing-service.ts");
+  const admin = await authenticate("admin", "admin-pass-123");
+  if (typeof admin !== "object") throw new Error("admin");
+  const now = Date.now();
+  await dbRun(
+    `INSERT INTO gateways (id, name, base_url, token_cipher, admin_user_id, demo, created_at, updated_at, disabled)
+     VALUES ('win', 'on', 'https://window.example', '', '1', 0, ?, ?, 0)`,
+    [now, now],
+  );
+  await dbRun(
+    `INSERT INTO channels (
+      id, gateway_id, upstream_id, creator_user_id, name, type, group_name, status, created_at, updated_at, created_here, today_quota
+    ) VALUES ('win-ch', 'win', 1, ?, 'win', 1, 'pool', 1, ?, ?, 1, 1)`,
+    [admin.id, now, now],
+  );
+  const days: string[] = [];
+  for (let index = 0; index < 35; index += 1) {
+    const date = new Date(Date.UTC(2026, 8, 1 + index));
+    days.push(date.toISOString().slice(0, 10));
+  }
+  for (const day of days) {
+    await dbRun(
+      `INSERT INTO billing_rows (id, bill_day, channel_id, start_day, end_day, span_days, kind, consumption)
+       VALUES (?, ?, 'win-ch', ?, ?, 1, 'amount', 1)`,
+      [`row-${day}`, day, day, day],
+    );
+    await dbRun(
+      `INSERT INTO billing_runs (baseline_day, bill_day, status, started_at, published_at)
+       VALUES (?, ?, 'published', ?, ?)`,
+      [`base-${day}`, day, now, now],
+    );
+  }
+  const newest = await billingView(admin, { day: days[days.length - 1] });
+  assert.equal(newest.trend.length, 30);
+  assert.equal(newest.trend.some((item) => item.day === days[0]), false);
+  assert.equal(newest.trend.some((item) => item.day === days[days.length - 1]), true);
+  assert.equal(newest.trend[0]?.day, days[5]);
+  const oldest = await billingView(admin, { day: days[0] });
+  assert.equal(oldest.billDay, days[0]);
+  assert.equal(oldest.rows.length, 1);
+  assert.equal(oldest.trend.length, 30);
+  assert.equal(oldest.trend.some((item) => item.day === days[0]), false);
+});
+
+test("a later snapshot for d+1 changes the cached trend and the bill total together", async () => {
+  const { dbRun } = await freshDb();
+  const { authenticate } = await import("./users.ts");
+  const { billingView } = await import("./billing-service.ts");
+  const admin = await authenticate("admin", "admin-pass-123");
+  if (typeof admin !== "object") throw new Error("admin");
+  const now = Date.now();
+  await dbRun(
+    `INSERT INTO gateways (id, name, base_url, token_cipher, admin_user_id, demo, created_at, updated_at, disabled, kind)
+     VALUES ('snap-gw', 'supplier', 'https://snap-cache.example', '', '1', 0, ?, ?, 0, 'newapi_supplier')`,
+    [now, now],
+  );
+  await dbRun(
+    `INSERT INTO channels (
+      id, gateway_id, upstream_id, creator_user_id, name, type, group_name, status, created_at, updated_at, created_here
+    ) VALUES ('snap-ch', 'snap-gw', 1, ?, 'snap', 1, 'pool', 1, ?, ?, 1)`,
+    [admin.id, now, now],
+  );
+  await dbRun(
+    `INSERT INTO billing_snapshots (channel_id, day, source_id, quality, amount, unit, pulled_at)
+     VALUES ('snap-ch', '2026-11-08', 'customer_billing', 'ok', 0, 'usd', ?)`,
+    [now],
+  );
+  await dbRun(
+    `INSERT INTO billing_runs (baseline_day, bill_day, status, started_at, published_at)
+     VALUES ('2026-11-09', '2026-11-08', 'published', ?, ?),
+            ('2026-11-10', '2026-11-09', 'published', ?, ?)`,
+    [now, now, now, now],
+  );
+  const cached = await billingView(admin, { day: "2026-11-09" });
+  const before = cached.trend.find((item) => item.day === "2026-11-08");
+  assert.ok(before);
+  assert.equal(before.missing, true);
+  assert.equal(before.value, null);
+  await dbRun(
+    `INSERT INTO billing_snapshots (channel_id, day, source_id, quality, amount, unit, pulled_at)
+     VALUES ('snap-ch', '2026-11-09', 'customer_billing', 'ok', 2, 'usd', ?)`,
+    [now + 1],
+  );
+  const again = await billingView(admin, { day: "2026-11-09" });
+  const point = again.trend.find((item) => item.day === "2026-11-08");
+  const opened = await billingView(admin, { day: "2026-11-08" });
+  const table = columnSummary(opened.rows.map((row) => row.today));
+  assert.ok(point);
+  assert.equal(point.missing, false);
+  assert.equal(point.value, 2 * 500_000);
+  assert.notEqual(point.value, before.value);
+  assert.equal(table.value, point.value);
+  assert.equal(table.missing, point.missing);
+  assert.equal(opened.trend.find((item) => item.day === "2026-11-08")?.value, table.value);
+});
+
+test("a billing_rows rewrite for a published day changes the cached trend and the bill total together", async () => {
+  const { dbRun } = await freshDb();
+  const { authenticate } = await import("./users.ts");
+  const { billingView } = await import("./billing-service.ts");
+  const admin = await authenticate("admin", "admin-pass-123");
+  if (typeof admin !== "object") throw new Error("admin");
+  const now = Date.now();
+  await dbRun(
+    `INSERT INTO gateways (id, name, base_url, token_cipher, admin_user_id, demo, created_at, updated_at, disabled)
+     VALUES ('row-gw', 'admin', 'https://row-cache.example', '', '1', 0, ?, ?, 0)`,
+    [now, now],
+  );
+  await dbRun(
+    `INSERT INTO channels (
+      id, gateway_id, upstream_id, creator_user_id, name, type, group_name, status, created_at, updated_at, created_here
+    ) VALUES ('row-ch', 'row-gw', 1, ?, 'row', 1, 'pool', 1, ?, ?, 1)`,
+    [admin.id, now, now],
+  );
+  await dbRun(
+    `INSERT INTO billing_rows (id, bill_day, channel_id, start_day, end_day, span_days, kind, consumption)
+     VALUES ('2026-11-10:row-ch', '2026-11-10', 'row-ch', '2026-11-10', '2026-11-10', 1, 'amount', 100),
+            ('2026-11-11:row-ch', '2026-11-11', 'row-ch', '2026-11-11', '2026-11-11', 1, 'amount', 5)`,
+  );
+  await dbRun(
+    `INSERT INTO billing_runs (baseline_day, bill_day, status, started_at, published_at, aggregation)
+     VALUES ('2026-11-11', '2026-11-10', 'published', ?, ?, 'dedup'),
+            ('2026-11-12', '2026-11-11', 'published', ?, ?, 'dedup')`,
+    [now, now, now, now],
+  );
+  await dbRun("INSERT INTO billing_membership (bill_day, channel_id, role) VALUES ('2026-11-10', 'row-ch', 'counted'), ('2026-11-11', 'row-ch', 'counted')");
+  const cached = await billingView(admin, { day: "2026-11-11" });
+  const before = cached.trend.find((item) => item.day === "2026-11-10");
+  assert.ok(before);
+  assert.equal(before.value, 100);
+  await dbRun("UPDATE billing_rows SET consumption = 250 WHERE bill_day = '2026-11-10' AND channel_id = 'row-ch'");
+  const again = await billingView(admin, { day: "2026-11-11" });
+  const point = again.trend.find((item) => item.day === "2026-11-10");
+  const opened = await billingView(admin, { day: "2026-11-10" });
+  assert.ok(point);
+  assert.equal(point.value, 250);
+  assert.notEqual(point.value, before.value);
+  assert.equal(opened.totalConsumption, 250);
+  assert.equal(opened.trend.find((item) => item.day === "2026-11-10")?.value, opened.totalConsumption);
+  assert.equal(point.value, opened.totalConsumption);
+});
+
+test("a null consumption becoming 0 changes the cached trend from missing to zero", async () => {
+  const { dbRun } = await freshDb();
+  const { authenticate } = await import("./users.ts");
+  const { billingView } = await import("./billing-service.ts");
+  const admin = await authenticate("admin", "admin-pass-123");
+  if (typeof admin !== "object") throw new Error("admin");
+  const now = Date.now();
+  await dbRun(
+    `INSERT INTO gateways (id, name, base_url, token_cipher, admin_user_id, demo, created_at, updated_at, disabled)
+     VALUES ('null-gw', 'admin', 'https://null-cache.example', '', '1', 0, ?, ?, 0)`,
+    [now, now],
+  );
+  await dbRun(
+    `INSERT INTO channels (
+      id, gateway_id, upstream_id, creator_user_id, name, type, group_name, status, created_at, updated_at, created_here
+    ) VALUES ('null-ch', 'null-gw', 1, ?, 'null', 1, 'pool', 1, ?, ?, 1),
+             ('null-other', 'null-gw', 2, ?, 'other', 1, 'pool', 1, ?, ?, 1)`,
+    [admin.id, now, now, admin.id, now, now],
+  );
+  await dbRun(
+    `INSERT INTO billing_rows (id, bill_day, channel_id, start_day, end_day, span_days, kind, consumption)
+     VALUES ('2026-11-10:null-ch', '2026-11-10', 'null-ch', '2026-11-10', '2026-11-10', 1, 'amount', NULL),
+            ('2026-11-11:null-other', '2026-11-11', 'null-other', '2026-11-11', '2026-11-11', 1, 'amount', 5)`,
+  );
+  await dbRun(
+    `INSERT INTO billing_runs (baseline_day, bill_day, status, started_at, published_at, aggregation)
+     VALUES ('2026-11-11', '2026-11-10', 'published', ?, ?, 'dedup'),
+            ('2026-11-12', '2026-11-11', 'published', ?, ?, 'dedup')`,
+    [now, now, now, now],
+  );
+  await dbRun(
+    `INSERT INTO billing_membership (bill_day, channel_id, role)
+     VALUES ('2026-11-10', 'null-ch', 'counted'), ('2026-11-11', 'null-other', 'counted')`,
+  );
+  const cached = await billingView(admin, { day: "2026-11-11" });
+  const before = cached.trend.find((item) => item.day === "2026-11-10");
+  assert.ok(before);
+  assert.equal(before.missing, true);
+  assert.equal(before.value, null);
+  assert.equal(before.readings, 0);
+  await dbRun("UPDATE billing_rows SET consumption = 0 WHERE bill_day = '2026-11-10' AND channel_id = 'null-ch'");
+  const again = await billingView(admin, { day: "2026-11-11" });
+  const point = again.trend.find((item) => item.day === "2026-11-10");
+  const opened = await billingView(admin, { day: "2026-11-10" });
+  const openedPoint = opened.trend.find((item) => item.day === "2026-11-10");
+  assert.ok(point);
+  assert.ok(openedPoint);
+  assert.equal(point.missing, false);
+  assert.equal(point.value, 0);
+  assert.equal(point.readings, 1);
+  assert.notEqual(point.missing, before.missing);
+  assert.equal(opened.reading.readings, point.readings);
+  assert.equal(opened.reading.consumption, point.value);
+  assert.equal(openedPoint.value, point.value);
+  assert.equal(openedPoint.missing, point.missing);
+  assert.equal(openedPoint.readings, point.readings);
+});
+
+test("a snapshot quality change from failed to ok changes the cached trend from missing to zero", async () => {
+  const { dbRun } = await freshDb();
+  const { authenticate } = await import("./users.ts");
+  const { billingView } = await import("./billing-service.ts");
+  const admin = await authenticate("admin", "admin-pass-123");
+  if (typeof admin !== "object") throw new Error("admin");
+  const now = Date.now();
+  await dbRun(
+    `INSERT INTO gateways (id, name, base_url, token_cipher, admin_user_id, demo, created_at, updated_at, disabled, kind)
+     VALUES ('qual-gw', 'supplier', 'https://qual-cache.example', '', '1', 0, ?, ?, 0, 'newapi_supplier')`,
+    [now, now],
+  );
+  await dbRun(
+    `INSERT INTO channels (
+      id, gateway_id, upstream_id, creator_user_id, name, type, group_name, status, created_at, updated_at, created_here
+    ) VALUES ('qual-ch', 'qual-gw', 1, ?, 'qual', 1, 'pool', 1, ?, ?, 1)`,
+    [admin.id, now, now],
+  );
+  await dbRun(
+    `INSERT INTO billing_snapshots (channel_id, day, source_id, quality, amount, unit, fx_rate, pulled_at)
+     VALUES ('qual-ch', '2026-11-08', 'customer_billing', 'ok', 0, 'usd', NULL, ?),
+            ('qual-ch', '2026-11-09', 'customer_billing', 'failed', 0, 'usd', NULL, ?)`,
+    [now, now],
+  );
+  await dbRun(
+    `INSERT INTO billing_runs (baseline_day, bill_day, status, started_at, published_at)
+     VALUES ('2026-11-09', '2026-11-08', 'published', ?, ?),
+            ('2026-11-10', '2026-11-09', 'published', ?, ?)`,
+    [now, now, now, now],
+  );
+  const cached = await billingView(admin, { day: "2026-11-09" });
+  const before = cached.trend.find((item) => item.day === "2026-11-08");
+  assert.ok(before);
+  assert.equal(before.missing, true);
+  assert.equal(before.value, null);
+  await dbRun("UPDATE billing_snapshots SET quality = 'ok' WHERE channel_id = 'qual-ch' AND day = '2026-11-09'");
+  const again = await billingView(admin, { day: "2026-11-09" });
+  const point = again.trend.find((item) => item.day === "2026-11-08");
+  const opened = await billingView(admin, { day: "2026-11-08" });
+  const table = columnSummary(opened.rows.map((row) => row.today));
+  assert.ok(point);
+  assert.equal(point.missing, false);
+  assert.equal(point.value, 0);
+  assert.equal(point.readings, (before.readings ?? 0) + 1);
+  assert.equal(table.missing, false);
+  assert.equal(table.value, 0);
+  assert.equal(point.value, table.value);
+  assert.equal(point.missing, table.missing);
+  assert.equal(opened.trend.find((item) => item.day === "2026-11-08")?.value, table.value);
+  assert.equal(opened.reading.readings, point.readings);
 });

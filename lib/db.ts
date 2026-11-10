@@ -348,24 +348,44 @@ function sqlite(): Sql {
   }
   const db = new DatabaseSync(file);
   db.exec("PRAGMA foreign_keys = ON");
+  let busy: Promise<void> | null = null;
+  const waitIdle = async () => {
+    while (busy) await busy;
+  };
   return {
     async exec(statement) {
+      await waitIdle();
       db.exec(statement);
     },
     async get(statement, params = []) {
+      await waitIdle();
       return asRow(db.prepare(statement).get(...params));
     },
     async all(statement, params = []) {
+      await waitIdle();
       return db
         .prepare(statement)
         .all(...params)
         .map((item: unknown) => asRow(item)!);
     },
     async run(statement, params = []) {
+      await waitIdle();
       db.prepare(statement).run(...params);
     },
     transaction(fn) {
-      const run = sqliteTx.then(() => withSqliteTransaction(db, fn));
+      const run = sqliteTx.then(async () => {
+        await waitIdle();
+        let release: () => void = () => undefined;
+        busy = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        try {
+          return await withSqliteTransaction(db, fn);
+        } finally {
+          release();
+          busy = null;
+        }
+      });
       sqliteTx = run.then(
         () => undefined,
         () => undefined,

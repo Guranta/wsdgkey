@@ -87,6 +87,95 @@ export function disabledGatewayAmountText(
   return readingAmountText(summary, money, missing, incomplete);
 }
 
+/**
+ * The pre-#12 column total. No present values is 缺数据. A mix keeps the sum and the old
+ * 「$0.00 · 不完整」 mark, without an n/total count.
+ */
+export function columnSummary(values: readonly (number | null | undefined)[]): { value: number | null; missing: boolean; partial: boolean } {
+  const present = values.filter((value): value is number => value !== null && value !== undefined);
+  const absent = values.some((value) => value === null || value === undefined);
+  if (present.length === 0) return { value: null, missing: true, partial: false };
+  return {
+    value: present.reduce((total, value) => total + value, 0),
+    missing: false,
+    partial: absent,
+  };
+}
+
+export function columnTotalText(
+  summary: { value: number | null; missing: boolean; partial: boolean },
+  money: (value: number) => string,
+  missing: string,
+  incomplete: string,
+): string {
+  if (summary.missing || summary.value === null) return missing;
+  if (summary.partial) return `${money(summary.value)} · ${incomplete}`;
+  return money(summary.value);
+}
+
+export type TrendAmountPoint = {
+  day: string;
+  label?: string;
+  span?: boolean;
+  legacy?: boolean;
+  value: number | null;
+  missing?: boolean;
+  partial?: boolean;
+  readings?: number;
+  channels?: number;
+  complete?: boolean;
+};
+
+/** Dedup days use the n/total reading text. Legacy days use the old column total. */
+export function trendAmountText(
+  item: TrendAmountPoint,
+  money: (value: number) => string,
+  missing: string,
+  incomplete: string,
+  readingsNote: (readings: number, channels: number) => string,
+): string {
+  if (item.legacy) {
+    return columnTotalText(
+      {
+        value: item.missing || item.value === null || item.value === undefined ? null : item.value,
+        missing: Boolean(item.missing) || item.value === null || item.value === undefined,
+        partial: Boolean(item.partial),
+      },
+      money,
+      missing,
+      incomplete,
+    );
+  }
+  return readingAmountText(
+    {
+      channels: item.channels ?? 0,
+      readings: item.readings ?? 0,
+      consumption: item.missing ? null : item.value,
+      complete: Boolean(item.complete),
+    },
+    money,
+    missing,
+    readingsNote,
+  );
+}
+
+/** Hover title: the visible date (or a multi-day range) plus the same text as that day's 合计 cell. */
+export function trendHoverTitle(
+  item: TrendAmountPoint,
+  money: (value: number) => string,
+  missing: string,
+  incomplete: string,
+  readingsNote: (readings: number, channels: number) => string,
+): string {
+  const prefix = item.span && item.label ? item.label : item.day.slice(5);
+  return `${prefix} · ${trendAmountText(item, money, missing, incomplete, readingsNote)}`;
+}
+
+/** True when the chart window has days and every one of them is a real zero, not a missing or partial day. */
+export function trendWindowAllZero(items: { value: number | null; missing?: boolean; partial?: boolean }[]): boolean {
+  return items.length > 0 && items.every((item) => item.missing !== true && item.partial !== true && item.value === 0);
+}
+
 /** Date input value. A hand-picked day wins. Otherwise show the bill actually loaded, never today's date. */
 export function billingPickerDay(
   picked: string | null,
