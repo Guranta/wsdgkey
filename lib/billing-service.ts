@@ -596,45 +596,67 @@ function groupSlices(rows: Row[], nameOf: (row: Row) => string, legacy: boolean)
   return slices.sort((a, b) => b.value - a.value);
 }
 
-function trendFrom(
-  rows: Row[],
-  modeFor: (day: string) => BillAggregateMode,
-  rolesFor: (day: string) => Map<string, string> | undefined,
-): { day: string; label: string; spanDays: number; value: number; span: boolean }[] {
-  const byDay = new Map<string, Row[]>();
-  for (const row of rows) {
-    const day = String(row.bill_day);
-    const list = byDay.get(day) ?? [];
-    list.push(row);
-    byDay.set(day, list);
-  }
-  const out: { day: string; label: string; spanDays: number; value: number; span: boolean }[] = [];
-  for (const [day, list] of [...byDay.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
-    const mode = modeFor(day);
-    const counted = selectBillRows(list, mode, rolesFor(day) ?? null).preferred;
-    const buckets = new Map<string, { label: string; spanDays: number; value: number }>();
-    for (const row of counted) {
-      const amount = mode === "legacy"
-        ? row.consumption === null || row.consumption === undefined
-          ? 0
-          : Number(row.consumption)
-        : consumptionOf(row);
-      if (amount === null) continue;
-      const label = row.label ? String(row.label) : "";
-      const current = buckets.get(label) ?? { label, spanDays: Number(row.span_days ?? 1), value: 0 };
-      current.value += amount;
-      current.spanDays = Math.max(current.spanDays, Number(row.span_days ?? 1));
-      buckets.set(label, current);
-    }
-    for (const bucket of buckets.values()) {
-      out.push({ day, label: bucket.label, spanDays: bucket.spanDays, value: bucket.value, span: Boolean(bucket.label) });
-    }
-  }
-  return out;
+type DayTotal = {
+  value: number | null;
+  missing: boolean;
+  readings: number;
+  channels: number;
+  complete: boolean;
+};
+
+/** The bill-table 合计 for one already-selected row set. No readings stay missing, never 0. */
+function summarizeDay(rows: Row[]): DayTotal {
+  const rollup = rollupReadings(rows);
+  return {
+    value: rollup.consumption,
+    missing: rollup.readings === 0,
+    readings: rollup.readings,
+    channels: rollup.channels,
+    complete: rollup.complete,
+  };
 }
 
-async function loadMergedRows(billDay: string, scope: string, scopeParams: unknown[]): Promise<{ storedRows: Row[]; merged: Row[] }> {
-  const rows = (await dbAll(
+type DayAssembly = {
+  storedRows: Row[];
+  merged: Row[];
+  preferred: Row[];
+  excluded: Row[];
+  legacy: boolean;
+  unpublished: boolean;
+  total: DayTotal;
+};
+
+/** One day's rows, rule, and 合计. The open bill and every trend day both use this. */
+async function assembleDay(
+  billDay: string,
+  scope: string,
+  scopeParams: unknown[],
+  run: Row | undefined,
+  roles: Map<string, string> | null,
+): Promise<DayAssembly> {
+  const loaded = await loadMergedRows(billDay, scope, scopeParams);
+  const mode = billAggregateMode(run);
+  const legacy = mode === "legacy";
+  const selected = selectBillRows(loaded.merged, mode, mode === "frozen" ? roles : null);
+  return {
+    storedRows: loaded.storedRows,
+    merged: loaded.merged,
+    preferred: selected.preferred,
+    excluded: selected.excluded,
+    legacy,
+    unpublished: !run || String(run.status) !== "published",
+    total: summarizeDay(selected.preferred),
+  };
+}
+
+type SqlRead = {
+  all(statement: string, params?: unknown[]): Promise<Row[]>;
+};
+
+const globalRead: SqlRead = { all: (statement, params = []) => dbAll(statement, params) };
+
+async function loadMergedRows(billDay: string, scope: string, scopeParams: unknown[], db: SqlRead = globalRead): Promise<{ storedRows: Row[]; merged: Row[] }> {
+  const rows = (await db.all(
     `SELECT r.*, c.name, c.group_name, c.balance, c.used_quota, c.today_quota, c.type, c.origin, c.upstream_id,
             COALESCE(g.disabled, 0) AS gateway_disabled, g.base_url AS gateway_base, u.name AS creator_name
      FROM billing_rows r
@@ -645,11 +667,11 @@ async function loadMergedRows(billDay: string, scope: string, scopeParams: unkno
      ORDER BY c.upstream_id`,
     [billDay, ...scopeParams],
   )) as Row[];
-  const supplierIdRows = (await dbAll(
+  const supplierIdRows = (await db.all(
     `SELECT c.id FROM channels c JOIN gateways g ON g.id = c.gateway_id WHERE g.kind = 'newapi_supplier' AND c.created_here = 1`,
   )) as { id: string }[];
   const supplierIds = new Set(supplierIdRows.map((row) => String(row.id)));
-  const supplierChannels = (await dbAll(
+  const supplierChannels = (await db.all(
     `SELECT c.id, c.name, c.group_name, c.type, u.name AS creator_name, c.imported_at, c.upstream_id, c.used_quota, c.balance,
             COALESCE(g.disabled, 0) AS gateway_disabled, g.base_url AS gateway_base
      FROM channels c JOIN gateways g ON g.id = c.gateway_id LEFT JOIN users u ON u.id = c.creator_user_id
@@ -657,7 +679,7 @@ async function loadMergedRows(billDay: string, scope: string, scopeParams: unkno
     scopeParams,
   )) as Row[];
   const supplierMeta = new Map(supplierChannels.map((row) => [String(row.id), row]));
-  const supplierRows = (await supplierBillRows(supplierChannels, billDay)).map((row) => {
+  const supplierRows = (await supplierBillRows(supplierChannels, billDay, db)).map((row) => {
     const source = supplierMeta.get(String(row.channel_id));
     return source
       ? { ...row, upstream_id: source.upstream_id, gateway_disabled: source.gateway_disabled, gateway_base: source.gateway_base }
@@ -693,7 +715,7 @@ async function adoptNullDedupDay(billDay: string): Promise<void> {
       [billDay, DEDUP_RULE_START],
     );
     if (!open.length) return;
-    const roles = partitionRoles((await loadMergedRows(billDay, "", [])).merged);
+    const roles = partitionRoles((await loadMergedRows(billDay, "", [], tx)).merged);
     await tx.run("DELETE FROM billing_membership WHERE bill_day = ?", [billDay]);
     for (const [channelId, role] of roles) {
       await tx.run(
@@ -712,7 +734,10 @@ async function adoptNullDedupDay(billDay: string): Promise<void> {
   });
 }
 
-/** Freeze the unscoped dedup decision for a bill that is being published for the first time. */
+/**
+ * Freeze the unscoped dedup decision for a bill that is being published for the first time.
+ * Not inside a transaction: these writes are their own statements, so a later rollback cannot take them with it.
+ */
 async function freezeBillMembership(billDay: string): Promise<void> {
   const roles = partitionRoles((await loadMergedRows(billDay, "", [])).merged);
   await dbRun("DELETE FROM billing_membership WHERE bill_day = ?", [billDay]);
@@ -723,19 +748,19 @@ async function freezeBillMembership(billDay: string): Promise<void> {
 
 
 /** 源 C 行：billDay 与次日两张 0 点快照的 USD 差（billing-pluggable §4/§9）。金额乘 QUOTA_PER_DOLLAR 入 consumption，沿用下游额度→美元格式化。 */
-async function supplierBillRows(channels: Row[], billDay: string): Promise<Row[]> {
+async function supplierBillRows(channels: Row[], billDay: string, db: SqlRead = globalRead): Promise<Row[]> {
   if (!channels.length) return [];
   const { addDays } = await import("./shanghai");
   const nextDay = addDays(billDay, 1);
   const ids = channels.map((channel) => String(channel.id));
   const placeholders = ids.map(() => "?").join(",");
-  const snaps = (await dbAll(
+  const snaps = (await db.all(
     `SELECT channel_id, day, quality, amount, fx_rate, upstream_source FROM billing_snapshots
      WHERE source_id = 'customer_billing' AND day IN (?, ?) AND channel_id IN (${placeholders})`,
     [billDay, nextDay, ...ids],
   )) as Row[];
   const byChannel = new Map<string, { today?: Row; next?: Row; firstDay?: string }>();
-  const firstDays = (await dbAll(
+  const firstDays = (await db.all(
     `SELECT channel_id, MIN(day) AS first_day FROM billing_snapshots WHERE source_id = 'customer_billing' AND channel_id IN (${placeholders}) GROUP BY channel_id`,
     ids,
   )) as Row[];
@@ -846,35 +871,23 @@ export async function billingView(actor: SessionUser, options: BillingViewOption
   const scopeSupplier = scopedToSupplier ? "AND c.creator_user_id = ?" : "";
   const scopeParams = scopedToSupplier ? [actor.role === "admin" ? String(options.supplierId) : scopeOwnerId(actor)] : [];
   const scope = scopeSupplier;
-  const loaded = billDay ? await loadMergedRows(billDay, scope, scopeParams) : { storedRows: [] as Row[], merged: [] as Row[] };
-  const rows = loaded.storedRows;
-  const merged = loaded.merged;
-  const legacy = mode === "legacy";
-  let roles: Map<string, string> | null = null;
-  if (mode === "frozen" && billDay) {
-    const membership = (await dbAll("SELECT channel_id, role FROM billing_membership WHERE bill_day = ?", [billDay])) as Row[];
-    roles = new Map(membership.map((row) => [String(row.channel_id), String(row.role)]));
-  }
-  const { preferred, excluded } = selectBillRows(merged, mode, roles);
-  const visible = unsyncedOnly ? preferred.filter((row) => row.kind !== "amount") : preferred;
-  const markers = billDay ? await rebindMarkers(visible.map((row) => String(row.channel_id)), billDay) : new Map();
-  const counted = legacy ? preferred.filter(legacyAmount) : preferred.filter((row) => consumptionOf(row) !== null);
-  const unsynced = preferred.filter((row) => row.kind !== "amount");
-  const disabledGateway = legacy
-    ? { channels: 0, readings: 0, consumption: null, complete: true }
-    : rollupReadings(excluded);
-  const balanceRows = legacy ? merged : preferred;
-  const nameOf = (key: string) => (row: Row) => String(row[key] ?? "") || "unknown";
-  const trendRows = (await dbAll(
-    `SELECT r.bill_day, r.label, r.span_days, r.consumption, r.kind, r.channel_id,
-            c.upstream_id, COALESCE(g.disabled, 0) AS gateway_disabled, g.base_url AS gateway_base
-     FROM billing_rows r
-     JOIN channels c ON c.id = r.channel_id
-     LEFT JOIN gateways g ON g.id = c.gateway_id
-     WHERE r.kind = 'amount' AND c.created_here = 1 ${scope}`,
+  const runMeta = (await dbAll("SELECT * FROM billing_runs")) as Row[];
+  const rowDays = (await dbAll(
+    `SELECT DISTINCT r.bill_day FROM billing_rows r JOIN channels c ON c.id = r.channel_id WHERE c.created_here = 1 ${scope}`,
     scopeParams,
   )) as Row[];
-  const runMeta = (await dbAll("SELECT bill_day, status, aggregation FROM billing_runs")) as Row[];
+  const runsByDay = new Map<string, Row[]>();
+  for (const run of runMeta) {
+    const day = String(run.bill_day);
+    const list = runsByDay.get(day) ?? [];
+    list.push(run);
+    runsByDay.set(day, list);
+  }
+  for (const row of rowDays) {
+    const day = String(row.bill_day);
+    if (!runsByDay.has(day)) runsByDay.set(day, []);
+  }
+  if (billDay && !runsByDay.has(billDay)) runsByDay.set(billDay, []);
   const membershipRows = (await dbAll("SELECT bill_day, channel_id, role FROM billing_membership")) as Row[];
   const rolesByDay = new Map<string, Map<string, string>>();
   for (const row of membershipRows) {
@@ -883,8 +896,29 @@ export async function billingView(actor: SessionUser, options: BillingViewOption
     map.set(String(row.channel_id), String(row.role));
     rolesByDay.set(day, map);
   }
-  const modeFor = (day: string): BillAggregateMode =>
-    billAggregateMode(publishedRun(runMeta.filter((row) => String(row.bill_day) === day)));
+  const runFor = (day: string) => {
+    const list = runsByDay.get(day) ?? [];
+    return publishedRun(list) ?? list.find((run) => String(run.status) !== "published") ?? list[0];
+  };
+  const assembled = new Map<string, DayAssembly>();
+  for (const day of [...runsByDay.keys()].sort()) {
+    assembled.set(day, await assembleDay(day, scope, scopeParams, runFor(day), rolesByDay.get(day) ?? null));
+  }
+  const current = billDay ? assembled.get(billDay) : undefined;
+  const rows = current?.storedRows ?? [];
+  const merged = current?.merged ?? [];
+  const legacy = current ? current.legacy : mode === "legacy";
+  const preferred = current?.preferred ?? [];
+  const excluded = current?.excluded ?? [];
+  const dayTotal = current?.total ?? summarizeDay([]);
+  const visible = unsyncedOnly ? preferred.filter((row) => row.kind !== "amount") : preferred;
+  const markers = billDay ? await rebindMarkers(visible.map((row) => String(row.channel_id)), billDay) : new Map();
+  const unsynced = preferred.filter((row) => row.kind !== "amount");
+  const disabledGateway = legacy
+    ? { channels: 0, readings: 0, consumption: null, complete: true }
+    : rollupReadings(excluded);
+  const balanceRows = legacy ? merged : preferred;
+  const nameOf = (key: string) => (row: Row) => String(row[key] ?? "") || "unknown";
   const counts = live
     ? await scopedCounts(String(live.baseline_day), actor)
     : { total: 0, ok: 0, failed: 0 };
@@ -903,7 +937,12 @@ export async function billingView(actor: SessionUser, options: BillingViewOption
       )) as { channel_id: string }[]).map((row) => row.channel_id)
     : [];
   const preferredIds = new Set(preferred.map((row) => String(row.channel_id)));
-  const reading = rollupReadings(preferred);
+  const reading = {
+    channels: dayTotal.channels,
+    readings: dayTotal.readings,
+    consumption: dayTotal.value,
+    complete: dayTotal.complete,
+  };
   return {
     copy: "schedule",
     requestedDay: requested || null,
@@ -926,7 +965,7 @@ export async function billingView(actor: SessionUser, options: BillingViewOption
     incomplete: unsynced.length > 0,
     disabledGateway,
     reading,
-    totalConsumption: counted.reduce((sum, row) => sum + Number(row.consumption ?? 0), 0),
+    totalConsumption: dayTotal.value ?? 0,
     totalTestQuota: balanceRows.reduce((sum, row) => sum + Number(row.test_quota ?? 0), 0),
     showTestLine: rows.some((row) => (legacy || preferredIds.has(String(row.channel_id))) && String(row.billing_mode ?? "") !== "snapshot"),
     remainingBalance: balanceRows.reduce((sum, row) => sum + (row.balance === null || row.balance === undefined ? 0 : Number(row.balance)), 0),
@@ -935,7 +974,15 @@ export async function billingView(actor: SessionUser, options: BillingViewOption
     bySupplier: groupSlices(preferred, nameOf("creator_name"), legacy),
     byChannel: groupSlices(preferred, nameOf("name"), legacy).slice(0, 8),
     byGroup: groupSlices(preferred, nameOf("group_name"), legacy),
-    trend: trendFrom(trendRows, modeFor, (day) => rolesByDay.get(day)),
+    trend: [...assembled.entries()].sort((a, b) => a[0].localeCompare(b[0])).map(([day, assembly]) => ({
+      day,
+      label: "",
+      spanDays: 1,
+      value: assembly.total.missing ? null : assembly.total.value,
+      span: false,
+      missing: assembly.total.missing,
+      unpublished: assembly.unpublished,
+    })),
     rows: visible.map((row) => ({
       id: String(row.channel_id),
       name: String(row.name ?? ""),

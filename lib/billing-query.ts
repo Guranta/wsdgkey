@@ -87,6 +87,11 @@ export function disabledGatewayAmountText(
   return readingAmountText(summary, money, missing, incomplete);
 }
 
+/** True when the chart window has days and every one of them is a real zero, not a missing day. */
+export function trendWindowAllZero(items: { value: number | null; missing?: boolean }[]): boolean {
+  return items.length > 0 && items.every((item) => item.missing !== true && item.value === 0);
+}
+
 /** Date input value. A hand-picked day wins. Otherwise show the bill actually loaded, never today's date. */
 export function billingPickerDay(
   picked: string | null,

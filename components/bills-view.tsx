@@ -3,7 +3,7 @@
 import { BillDayControl, BillPeriod, billFindingText, billLabelText, readingsNote, useBillingBill, type BillRow } from "@/components/billing-view";
 import { useConnections } from "@/components/providers";
 import { Alert, buttonClass, Card, PageHeader } from "@/components/ui";
-import { grandTotalLabel, groupSubtotalText, readingAmountText } from "@/lib/billing-query";
+import { grandTotalLabel, groupSubtotalText, readingAmountText, trendWindowAllZero } from "@/lib/billing-query";
 import { channelTypeOption } from "@/lib/channel-types";
 import { formatUsd } from "@/lib/format";
 import { formatShanghaiTime } from "@/lib/shanghai";
@@ -35,7 +35,8 @@ export function BillsView() {
   const groupToday = (rows: BillRow[]) =>
     dedup ? groupSubtotalText(rows, money, t("missingData"), readingsNote(t)) : summed(rows, "today");
   const unpublished = bill.publication === "unpublished" || (Boolean(bill.requestedDay) && !bill.billDay);
-  const max = Math.max(1, ...bill.trend.map((item) => item.value));
+  const max = Math.max(1, ...bill.trend.flatMap((item) => (item.missing || item.value == null ? [] : [item.value])));
+  const allZero = trendWindowAllZero(bill.trend);
   const typeGroups = new Map<string, BillRow[]>();
   for (const row of bill.rows) {
     const key = row.typeName || "—";
@@ -85,14 +86,23 @@ export function BillsView() {
       </div>
       <Card className="mb-4 p-4">
         <h2 className="text-sm font-semibold">{t("trend")}</h2>
-        <div className="mt-4 flex h-36 items-end gap-2 overflow-x-auto">
+        <div className="mt-4 flex h-36 items-stretch gap-2 overflow-x-auto">
           {bill.trend.length === 0 ? <p className="text-sm text-muted">{t("noTrend")}</p> : bill.trend.map((item) => (
-            <div key={`${item.day}-${item.label}`} className="flex min-w-8 flex-1 flex-col items-center gap-1">
-              <div className="w-full rounded-full" style={{ height: `${Math.max(8, (item.value / max) * 100)}%`, background: item.span ? "#FF9500" : "#007AFF" }} />
-              <span className="whitespace-nowrap text-[10px] text-muted">{item.span ? billLabelText(t, item) : item.day.slice(5)}</span>
+            <div key={`${item.day}-${item.label}`} className="flex h-full min-w-8 flex-1 flex-col items-center justify-end gap-1">
+              <div className="flex min-h-0 w-full flex-1 flex-col justify-end">
+                {item.missing ? (
+                  <span className="pb-1 text-center text-[10px] text-muted">{t("missingData")}</span>
+                ) : item.value === 0 ? (
+                  <div className="h-px w-full bg-[#8E8E93]" />
+                ) : (
+                  <div className="w-full rounded-full" style={{ height: `${(Number(item.value) / max) * 100}%`, background: item.unpublished ? "#FF9500" : "#007AFF" }} />
+                )}
+              </div>
+              <span className={`whitespace-nowrap text-[10px] ${item.unpublished ? "font-semibold text-warn" : "text-muted"}`}>{item.unpublished ? t("unpublishedTrend") : item.span ? billLabelText(t, item) : item.day.slice(5)}</span>
             </div>
           ))}
         </div>
+        {allZero ? <p className="mt-2 text-xs text-muted">{t("trendAllZero")}</p> : null}
       </Card>
       <Card>
         <div className="flex flex-wrap items-center justify-between gap-2 border-b border-line px-4 py-3">
@@ -156,7 +166,7 @@ export function BillsView() {
                   </tr>
                   <tr className="border-t border-line font-semibold">
                     <td className="px-4 py-3">{grandTotalLabel(bill.aggregation, Boolean(bill.incomplete), t("grandTotal"), t("incomplete"))}</td>
-                    <td className="whitespace-nowrap px-4 py-3 tabular-nums">{groupToday(allRows)}</td>
+                    <td className="whitespace-nowrap px-4 py-3 tabular-nums">{readingAmountText(bill.reading, money, t("missingData"), readingsNote(t))}</td>
                     <td className="whitespace-nowrap px-4 py-3 tabular-nums">{summed(allRows, "before")}</td>
                     <td className="whitespace-nowrap px-4 py-3 tabular-nums">{summed(allRows, "cumulative")}</td>
                   </tr>
@@ -164,7 +174,7 @@ export function BillsView() {
               ) : null}
               {dedup && bill.disabledGateway?.channels ? (
                 <tr className="border-t border-line text-muted">
-                  <td className="px-4 py-3">{t("disabledGatewayExcluded")}</td>
+                  <td className="px-4 py-3">{t("disabledGatewayExcludedCount", { count: bill.disabledGateway.channels })}</td>
                   <td className="whitespace-nowrap px-4 py-3 tabular-nums">{readingAmountText(bill.disabledGateway, money, t("missingData"), readingsNote(t))}</td>
                   <td className="px-4 py-3">—</td>
                   <td className="px-4 py-3">—</td>
