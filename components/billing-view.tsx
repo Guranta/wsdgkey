@@ -3,7 +3,7 @@
 import { KpiRing, QueueStrip, deltaText, type QueueSnap } from "@/components/channels-view";
 import { useConnections } from "@/components/providers";
 import { Alert, Card, PageHeader, useIsClient } from "@/components/ui";
-import { billingPickerDay, billingRequestQuery, disabledGatewayAmountText } from "@/lib/billing-query";
+import { billingPickerDay, billingRequestQuery, readingAmountText, type ReadingSummary } from "@/lib/billing-query";
 import { formatUsd } from "@/lib/format";
 import { useLocale, useTranslations } from "next-intl";
 import { useEffect, useState } from "react";
@@ -21,7 +21,14 @@ type OverviewStats = {
   queue: QueueSnap;
 };
 
-type Slice = { name: string; value: number };
+type Slice = {
+  name: string;
+  value: number;
+  channels?: number;
+  readings?: number;
+  consumption?: number | null;
+  complete?: boolean;
+};
 type BillRow = {
   id: string;
   name: string;
@@ -52,6 +59,7 @@ type Bill = {
   copy: string;
   requestedDay: string | null;
   publication?: "latest" | "published" | "unpublished" | "none";
+  aggregation?: "legacy" | "dedup";
   collecting: boolean;
   progress: { total: number; ok: number; failed: number; etaMinutes?: number };
   suppliers: { id: string; name: string }[];
@@ -60,7 +68,8 @@ type Bill = {
   billDay: string | null;
   unsyncedCount: number;
   incomplete?: boolean;
-  disabledGateway?: { channels: number; consumption: number | null; complete: boolean };
+  disabledGateway?: ReadingSummary;
+  reading?: ReadingSummary;
   totalConsumption: number;
   totalTestQuota: number;
   showTestLine?: boolean;
@@ -159,14 +168,20 @@ export function BillPeriod({ bill }: { bill: Bill }) {
   return <span className="text-secondary">{t("periodLine", { day: bill.billDay })}</span>;
 }
 
+export function readingsNote(t: (key: string, values: { readings: number; channels: number }) => string) {
+  return (readings: number, channels: number) => t("incompleteReadings", { readings, channels });
+}
+
 export function DisabledGatewayLine({ bill }: { bill: Bill }) {
   const t = useTranslations("billing");
   const locale = useLocale();
-  if (!bill.disabledGateway?.channels) return null;
+  if (bill.aggregation === "legacy" || !bill.disabledGateway?.channels) return null;
   return (
     <p className="text-sm text-muted">
       {t("disabledGatewayExcluded")}
-      <span className="ml-2 tabular-nums">{disabledGatewayAmountText(bill.disabledGateway, (value) => formatUsd(value, locale), t("missingData"), t("incomplete"))}</span>
+      <span className="ml-2 tabular-nums">
+        {readingAmountText(bill.disabledGateway, (value) => formatUsd(value, locale), t("missingData"), readingsNote(t))}
+      </span>
     </p>
   );
 }
@@ -215,6 +230,7 @@ function Donut({
   empty,
   unknown,
   money,
+  amountText,
 }: {
   title: string;
   slices: Slice[];
@@ -225,6 +241,7 @@ function Donut({
   empty: string;
   unknown: string;
   money: (value: number) => string;
+  amountText?: (slice: Slice) => string;
 }) {
   const r = (size - stroke) / 2;
   const c = 2 * Math.PI * r;
@@ -257,7 +274,7 @@ function Donut({
           {blank ? <li className="text-muted">{empty}</li> : arcs.map((arc) => (
             <li key={arc.name} className="flex items-center justify-between gap-2">
               <span className="flex min-w-0 items-center gap-1.5"><span className="h-2 w-2 shrink-0 rounded-[3px]" style={{ background: arc.color }} /><span className="truncate">{arc.name === "unknown" ? unknown : arc.name}</span></span>
-              <span className="shrink-0 whitespace-nowrap text-muted">{money(arc.value)}</span>
+              <span className="shrink-0 whitespace-nowrap text-muted">{amountText ? amountText(slices.find((slice) => slice.name === arc.name) ?? { name: arc.name, value: arc.value }) : money(arc.value)}</span>
             </li>
           ))}
         </ul>
@@ -292,9 +309,36 @@ export function BillingView() {
 
   if (!hydrated || !bill) return <p className="text-sm text-muted">{t("loading")}</p>;
   const money = (value: number) => formatUsd(value, locale);
+  const dedup = bill.aggregation === "dedup";
   const noAmounts = Boolean(bill.incomplete) && bill.byType.length === 0;
-  const totalLabel = noAmounts ? t("missingData") : money(bill.totalConsumption);
-  const totalCaption = bill.incomplete ? t("incomplete") : t("usage");
+  const totalLabel = dedup
+    ? bill.reading?.consumption == null
+      ? t("missingData")
+      : money(bill.reading.consumption)
+    : noAmounts
+      ? t("missingData")
+      : money(bill.totalConsumption);
+  const totalCaption = dedup
+    ? bill.reading && !bill.reading.complete && bill.reading.readings > 0
+      ? t("incompleteReadings", { readings: bill.reading.readings, channels: bill.reading.channels })
+      : t("usage")
+    : bill.incomplete
+      ? t("incomplete")
+      : t("usage");
+  const amountText = (slice: Slice) => {
+    if (!dedup || slice.channels === undefined || slice.readings === undefined) return money(slice.value);
+    return readingAmountText(
+      {
+        channels: slice.channels,
+        readings: slice.readings,
+        consumption: slice.consumption === undefined ? null : slice.consumption,
+        complete: Boolean(slice.complete),
+      },
+      money,
+      t("missingData"),
+      readingsNote(t),
+    );
+  };
 
   return (
     <div>
@@ -338,7 +382,7 @@ export function BillingView() {
         ) : null}
       </div>
       <div className="mb-4 grid items-stretch gap-3 xl:grid-cols-[minmax(0,1.5fr)_16rem]">
-        <Donut title={t("byType")} slices={bill.byType} size={240} stroke={28} center={totalLabel} caption={totalCaption} empty={t("noData")} unknown={t("unknownSupplier")} money={money} />
+        <Donut title={t("byType")} slices={bill.byType} size={240} stroke={28} center={totalLabel} caption={totalCaption} empty={t("noData")} unknown={t("unknownSupplier")} money={money} amountText={amountText} />
         <Card className="px-4 py-4">
           <div className="text-xs text-secondary">{t("excluded")}</div>
           <div className="mt-1 text-2xl font-semibold">{bill.unsyncedCount}</div>
@@ -346,9 +390,9 @@ export function BillingView() {
         </Card>
       </div>
       <div className={`grid gap-3 ${admin ? "lg:grid-cols-3" : "lg:grid-cols-2"}`}>
-        {admin ? <Donut title={t("bySupplier")} slices={bill.bySupplier} size={168} stroke={18} center={totalLabel} caption={totalCaption} empty={t("noData")} unknown={t("unknownSupplier")} money={money} /> : null}
-        <Donut title={t("byChannel")} slices={bill.byChannel} size={168} stroke={18} center={totalLabel} caption={totalCaption} empty={t("noData")} unknown={t("unknownSupplier")} money={money} />
-        <Donut title={t("byGroup")} slices={bill.byGroup} size={168} stroke={18} center={totalLabel} caption={totalCaption} empty={t("noData")} unknown={t("unknownSupplier")} money={money} />
+        {admin ? <Donut title={t("bySupplier")} slices={bill.bySupplier} size={168} stroke={18} center={totalLabel} caption={totalCaption} empty={t("noData")} unknown={t("unknownSupplier")} money={money} amountText={amountText} /> : null}
+        <Donut title={t("byChannel")} slices={bill.byChannel} size={168} stroke={18} center={totalLabel} caption={totalCaption} empty={t("noData")} unknown={t("unknownSupplier")} money={money} amountText={amountText} />
+        <Donut title={t("byGroup")} slices={bill.byGroup} size={168} stroke={18} center={totalLabel} caption={totalCaption} empty={t("noData")} unknown={t("unknownSupplier")} money={money} amountText={amountText} />
       </div>
       <div className="mt-3"><DisabledGatewayLine bill={bill} /></div>
     </div>

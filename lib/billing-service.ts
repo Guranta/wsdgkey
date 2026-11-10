@@ -1,8 +1,9 @@
 import { deriveBaseline, NEAR_MIDNIGHT_MS, reconcileFinding, resolveConsumption, resolveSellerConsumption, todayExcludingTests, type BaselinePoint } from "./billing-math";
+import { rollupReadingValues, type ReadingSummary } from "./billing-query";
 import { CALLS_PER_CHANNEL, LIST_SYNC_RESERVE_PER_MIN, type PlanChannel } from "./billing-plan";
 import { channelTypeName } from "./channel-types";
 import { QUOTA_PER_DOLLAR } from "./format";
-import { dbAll, dbGet, dbRun } from "./db";
+import { dbAll, dbGet, dbRun, dbTransaction } from "./db";
 import { getGateway } from "./gateways";
 import { syncReconChannel } from "./recon-service";
 import { rebindMarkers } from "./rebind";
@@ -10,6 +11,7 @@ import { rateLimits } from "./settings";
 import { addDays, formatShanghaiTime, logWindow, shanghaiClock, shanghaiMidnight } from "./shanghai";
 import { scopeOwnerId } from "./scope";
 import type { SessionUser } from "./types";
+import { isPostgresUrl } from "./paths";
 import { normalizeBaseUrl } from "./url";
 import { gatewayApi } from "./gateway-adapter";
 import { judgeListPage } from "./list-sweep";
@@ -327,19 +329,33 @@ async function writeRow(channelId: string, billDay: string, backfillAt: number |
   await syncReconChannel(billDay, channelId);
 }
 
+/**
+ * Publish one bill day.
+ * `billing_runs.aggregation` is the rule version, not a boolean.
+ * null means legacy: render the stored rows as they were published.
+ * 'dedup' means this generation of rules (dedup + disabled-gateway split).
+ * A later rule adds a new value instead of reusing these two.
+ * A run that is not already published is stamped 'dedup' and its membership is frozen.
+ * 2026-11-10 is the first such bill: `ensureBillingRun` publishes it at 06:00 Shanghai.
+ * A run that was already published keeps its version and is not re-partitioned.
+ */
 export async function publishBill(billDay: string, baselineDay: string): Promise<void> {
+  const existing = await dbGet("SELECT status FROM billing_runs WHERE baseline_day = ?", [baselineDay]);
+  const alreadyPublished = String(existing?.status ?? "") === "published";
   // 供应商 JWT 网关的渠道走源 C 快照差，由 billingView 现算；不进旧基线路径（used_quota=0 会造成假零）
   const channels = (await dbAll(
     `SELECT c.id FROM channels c JOIN gateways g ON g.id = c.gateway_id
      WHERE c.created_here = 1 AND COALESCE(g.kind, 'newapi_admin') <> 'newapi_supplier'`,
   )) as { id: string }[];
   for (const channel of channels) await writeRow(channel.id, billDay, null);
+  if (!alreadyPublished) await freezeBillMembership(billDay);
   const counts = await countRun(baselineDay);
   await dbRun(
-    `INSERT INTO billing_runs (baseline_day, bill_day, status, started_at, published_at, total_count, ok_count, failed_count)
-     VALUES (?, ?, 'published', ?, ?, ?, ?, ?)
+    `INSERT INTO billing_runs (baseline_day, bill_day, status, started_at, published_at, total_count, ok_count, failed_count, aggregation)
+     VALUES (?, ?, 'published', ?, ?, ?, ?, ?, 'dedup')
      ON CONFLICT(baseline_day) DO UPDATE SET status = 'published', published_at = excluded.published_at,
-       total_count = excluded.total_count, ok_count = excluded.ok_count, failed_count = excluded.failed_count`,
+       total_count = excluded.total_count, ok_count = excluded.ok_count, failed_count = excluded.failed_count,
+       aggregation = CASE WHEN billing_runs.status = 'published' THEN billing_runs.aggregation ELSE 'dedup' END`,
     [baselineDay, billDay, Date.now(), Date.now(), counts.total, counts.ok, counts.failed],
   );
 }
@@ -462,17 +478,129 @@ function consumptionOf(row: Row): number | null {
   return Number.isFinite(value) ? value : null;
 }
 
-/** Same three states as a group total: no readings, a partial sum, or a complete sum. A missing reading stays null and is never turned into 0. */
-export function rollupReadings(rows: Row[]): { channels: number; consumption: number | null; complete: boolean } {
-  const present = rows.map(consumptionOf).filter((value): value is number => value !== null);
-  return {
-    channels: rows.length,
-    consumption: present.length ? present.reduce((sum, value) => sum + value, 0) : null,
-    complete: rows.length > 0 && present.length === rows.length,
-  };
+/** Pre-#12 counted row: kind=amount and a non-null consumption, including non-finite values. */
+function legacyAmount(row: Row): boolean {
+  return String(row.kind) === "amount" && row.consumption !== null && row.consumption !== undefined;
 }
 
-function trendFrom(rows: Row[]): { day: string; label: string; spanDays: number; value: number; span: boolean }[] {
+/** Same three states as a group total: no readings, a partial sum, or a complete sum. A missing reading stays null and is never turned into 0. */
+export function rollupReadings(rows: Row[]): ReadingSummary {
+  return rollupReadingValues(
+    rows.map((row) => ({
+      kind: String(row.kind ?? ""),
+      consumption: row.consumption === null || row.consumption === undefined ? null : Number(row.consumption),
+    })),
+  );
+}
+
+type BillAggregateMode = "legacy" | "live" | "frozen";
+
+/**
+ * First bill_day on the dedup rules. A published run on or after this day whose
+ * aggregation is still null is stamped on the first read. 2026-11-09 and earlier stay as stored.
+ */
+export const DEDUP_RULE_START = "2026-11-10";
+
+/**
+ * One decision for the open bill and for every day in the trend.
+ * Unpublished runs are live. A published null version before DEDUP_RULE_START is the stored rows.
+ * 'dedup' is the frozen new rules. Any later version stays on the stored rows until it has a branch.
+ */
+function billAggregateMode(run: { status?: unknown; aggregation?: unknown } | null | undefined): BillAggregateMode {
+  if (!run || String(run.status ?? "") !== "published") return "live";
+  switch (String(run.aggregation ?? "")) {
+    case "dedup":
+      return "frozen";
+    default:
+      return "legacy";
+  }
+}
+
+function publishedRun(runs: Row[]): Row | undefined {
+  return runs
+    .filter((row) => String(row.status) === "published")
+    .sort((a, b) => Number(b.published_at ?? 0) - Number(a.published_at ?? 0))[0];
+}
+
+function partitionRoles(rows: Row[]): Map<string, "counted" | "excluded" | "duplicate"> {
+  const { counted, excluded } = partitionBillRows(rows);
+  const roles = new Map<string, "counted" | "excluded" | "duplicate">();
+  for (const row of rows) roles.set(String(row.channel_id), "duplicate");
+  for (const row of counted) roles.set(String(row.channel_id), "counted");
+  for (const row of excluded) roles.set(String(row.channel_id), "excluded");
+  return roles;
+}
+
+function selectBillRows(
+  merged: Row[],
+  mode: BillAggregateMode,
+  roles: Map<string, string> | null,
+): { preferred: Row[]; excluded: Row[] } {
+  if (mode === "legacy") return { preferred: merged, excluded: [] };
+  if (mode === "frozen" && roles && roles.size > 0) {
+    const preferred: Row[] = [];
+    const excluded: Row[] = [];
+    for (const row of merged) {
+      const role = roles.get(String(row.channel_id));
+      if (role === "counted") preferred.push(row);
+      else if (role === "excluded") excluded.push(row);
+    }
+    return { preferred, excluded };
+  }
+  const parts = partitionBillRows(merged);
+  return { preferred: parts.counted, excluded: parts.excluded };
+}
+
+type GroupSlice = {
+  name: string;
+  value: number;
+  channels: number;
+  readings: number;
+  consumption: number | null;
+  complete: boolean;
+};
+
+function groupSlices(rows: Row[], nameOf: (row: Row) => string, legacy: boolean): GroupSlice[] {
+  const buckets = new Map<string, Row[]>();
+  for (const row of rows) {
+    const name = nameOf(row) || "unknown";
+    const list = buckets.get(name) ?? [];
+    list.push(row);
+    buckets.set(name, list);
+  }
+  const slices: GroupSlice[] = [];
+  for (const [name, list] of buckets) {
+    const rollup = rollupReadings(list);
+    if (legacy) {
+      const amounts = list.filter(legacyAmount);
+      if (!amounts.length) continue;
+      slices.push({
+        name,
+        value: amounts.reduce((sum, row) => sum + Number(row.consumption ?? 0), 0),
+        channels: list.length,
+        readings: rollup.readings,
+        consumption: rollup.consumption,
+        complete: rollup.complete,
+      });
+    } else if (rollup.channels > 0) {
+      slices.push({
+        name,
+        value: rollup.consumption ?? 0,
+        channels: rollup.channels,
+        readings: rollup.readings,
+        consumption: rollup.consumption,
+        complete: rollup.complete,
+      });
+    }
+  }
+  return slices.sort((a, b) => b.value - a.value);
+}
+
+function trendFrom(
+  rows: Row[],
+  modeFor: (day: string) => BillAggregateMode,
+  rolesFor: (day: string) => Map<string, string> | undefined,
+): { day: string; label: string; spanDays: number; value: number; span: boolean }[] {
   const byDay = new Map<string, Row[]>();
   for (const row of rows) {
     const day = String(row.bill_day);
@@ -482,10 +610,15 @@ function trendFrom(rows: Row[]): { day: string; label: string; spanDays: number;
   }
   const out: { day: string; label: string; spanDays: number; value: number; span: boolean }[] = [];
   for (const [day, list] of [...byDay.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
-    const { counted } = partitionBillRows(list);
+    const mode = modeFor(day);
+    const counted = selectBillRows(list, mode, rolesFor(day) ?? null).preferred;
     const buckets = new Map<string, { label: string; spanDays: number; value: number }>();
     for (const row of counted) {
-      const amount = consumptionOf(row);
+      const amount = mode === "legacy"
+        ? row.consumption === null || row.consumption === undefined
+          ? 0
+          : Number(row.consumption)
+        : consumptionOf(row);
       if (amount === null) continue;
       const label = row.label ? String(row.label) : "";
       const current = buckets.get(label) ?? { label, spanDays: Number(row.span_days ?? 1), value: 0 };
@@ -498,6 +631,94 @@ function trendFrom(rows: Row[]): { day: string; label: string; spanDays: number;
     }
   }
   return out;
+}
+
+async function loadMergedRows(billDay: string, scope: string, scopeParams: unknown[]): Promise<{ storedRows: Row[]; merged: Row[] }> {
+  const rows = (await dbAll(
+    `SELECT r.*, c.name, c.group_name, c.balance, c.used_quota, c.today_quota, c.type, c.origin, c.upstream_id,
+            COALESCE(g.disabled, 0) AS gateway_disabled, g.base_url AS gateway_base, u.name AS creator_name
+     FROM billing_rows r
+     JOIN channels c ON c.id = r.channel_id
+     LEFT JOIN gateways g ON g.id = c.gateway_id
+     LEFT JOIN users u ON u.id = c.creator_user_id
+     WHERE r.bill_day = ? AND c.created_here = 1 ${scope}
+     ORDER BY c.upstream_id`,
+    [billDay, ...scopeParams],
+  )) as Row[];
+  const supplierIdRows = (await dbAll(
+    `SELECT c.id FROM channels c JOIN gateways g ON g.id = c.gateway_id WHERE g.kind = 'newapi_supplier' AND c.created_here = 1`,
+  )) as { id: string }[];
+  const supplierIds = new Set(supplierIdRows.map((row) => String(row.id)));
+  const supplierChannels = (await dbAll(
+    `SELECT c.id, c.name, c.group_name, c.type, u.name AS creator_name, c.imported_at, c.upstream_id, c.used_quota, c.balance,
+            COALESCE(g.disabled, 0) AS gateway_disabled, g.base_url AS gateway_base
+     FROM channels c JOIN gateways g ON g.id = c.gateway_id LEFT JOIN users u ON u.id = c.creator_user_id
+     WHERE g.kind = 'newapi_supplier' AND c.created_here = 1 ${scope}`,
+    scopeParams,
+  )) as Row[];
+  const supplierMeta = new Map(supplierChannels.map((row) => [String(row.id), row]));
+  const supplierRows = (await supplierBillRows(supplierChannels, billDay)).map((row) => {
+    const source = supplierMeta.get(String(row.channel_id));
+    return source
+      ? { ...row, upstream_id: source.upstream_id, gateway_disabled: source.gateway_disabled, gateway_base: source.gateway_base }
+      : row;
+  });
+  return {
+    storedRows: rows,
+    merged: [...rows.filter((row) => !supplierIds.has(String(row.channel_id))), ...supplierRows],
+  };
+}
+
+/**
+ * Published runs on or after DEDUP_RULE_START that were stored with a null rule version
+ * get one live dedup pass, then the same freeze publishBill writes. Earlier null runs are left alone.
+ * The stamp and the membership insert commit together. A second caller sees the stamp and does not write again.
+ */
+async function adoptNullDedupRuns(): Promise<void> {
+  const pending = await dbAll(
+    `SELECT DISTINCT bill_day FROM billing_runs
+     WHERE status = 'published' AND aggregation IS NULL AND bill_day >= ?`,
+    [DEDUP_RULE_START],
+  );
+  for (const row of pending) await adoptNullDedupDay(String(row.bill_day));
+}
+
+async function adoptNullDedupDay(billDay: string): Promise<void> {
+  if (billDay < DEDUP_RULE_START) return;
+  const lock = isPostgresUrl() ? " FOR UPDATE" : "";
+  await dbTransaction(async (tx) => {
+    const open = await tx.all(
+      `SELECT baseline_day FROM billing_runs
+       WHERE bill_day = ? AND status = 'published' AND aggregation IS NULL AND bill_day >= ?${lock}`,
+      [billDay, DEDUP_RULE_START],
+    );
+    if (!open.length) return;
+    const roles = partitionRoles((await loadMergedRows(billDay, "", [])).merged);
+    await tx.run("DELETE FROM billing_membership WHERE bill_day = ?", [billDay]);
+    for (const [channelId, role] of roles) {
+      await tx.run(
+        `INSERT INTO billing_membership (bill_day, channel_id, role) VALUES (?, ?, ?)
+         ON CONFLICT(bill_day, channel_id) DO NOTHING`,
+        [billDay, channelId, role],
+      );
+    }
+    const stamped = await tx.all(
+      `UPDATE billing_runs SET aggregation = 'dedup'
+       WHERE bill_day = ? AND status = 'published' AND aggregation IS NULL AND bill_day >= ?
+       RETURNING baseline_day`,
+      [billDay, DEDUP_RULE_START],
+    );
+    if (!stamped.length) throw new Error("dedup stamp lost");
+  });
+}
+
+/** Freeze the unscoped dedup decision for a bill that is being published for the first time. */
+async function freezeBillMembership(billDay: string): Promise<void> {
+  const roles = partitionRoles((await loadMergedRows(billDay, "", [])).merged);
+  await dbRun("DELETE FROM billing_membership WHERE bill_day = ?", [billDay]);
+  for (const [channelId, role] of roles) {
+    await dbRun("INSERT INTO billing_membership (bill_day, channel_id, role) VALUES (?, ?, ?)", [billDay, channelId, role]);
+  }
 }
 
 
@@ -586,86 +807,64 @@ async function supplierBillRows(channels: Row[], billDay: string): Promise<Row[]
 
 export async function billingView(actor: SessionUser, options: BillingViewOptions = {}) {
   const unsyncedOnly = options.unsyncedOnly === true;
+  await adoptNullDedupRuns();
   const clock = shanghaiClock();
   const live = await dbGet("SELECT * FROM billing_runs WHERE baseline_day = ?", [clock.day]);
   const requested = options.day?.trim() || "";
   const latest = ((await dbAll("SELECT * FROM billing_runs WHERE status = 'published' ORDER BY bill_day DESC LIMIT 1")) as Row[])[0];
   let publication: BillPublication;
   let showing: Row | undefined;
+  let billDay: string | null;
+  let mode: BillAggregateMode;
   if (!requested) {
     showing = latest;
     publication = showing ? "latest" : "none";
+    billDay = showing ? String(showing.bill_day) : null;
+    mode = billAggregateMode(showing);
   } else {
     const published = ((await dbAll(
       "SELECT * FROM billing_runs WHERE bill_day = ? AND status = 'published' ORDER BY published_at DESC LIMIT 1",
       [requested],
     )) as Row[])[0];
     if (!published) {
-      showing = undefined;
+      const open = ((await dbAll(
+        "SELECT * FROM billing_runs WHERE bill_day = ? ORDER BY started_at DESC LIMIT 1",
+        [requested],
+      )) as Row[])[0];
+      showing = open;
       publication = "unpublished";
+      billDay = open ? requested : null;
+      mode = billAggregateMode(open);
     } else {
       showing = published;
       publication = latest && String(latest.bill_day) === requested ? "latest" : "published";
+      billDay = String(published.bill_day);
+      mode = billAggregateMode(published);
     }
   }
-  const billDay = showing ? String(showing.bill_day) : null;
   const scopedToSupplier = actor.role !== "admin" || Boolean(options.supplierId);
   const scopeSupplier = scopedToSupplier ? "AND c.creator_user_id = ?" : "";
   const scopeParams = scopedToSupplier ? [actor.role === "admin" ? String(options.supplierId) : scopeOwnerId(actor)] : [];
   const scope = scopeSupplier;
-  const rows = billDay
-    ? ((await dbAll(
-        `SELECT r.*, c.name, c.group_name, c.balance, c.used_quota, c.today_quota, c.type, c.origin, c.upstream_id,
-                COALESCE(g.disabled, 0) AS gateway_disabled, g.base_url AS gateway_base, u.name AS creator_name
-         FROM billing_rows r
-         JOIN channels c ON c.id = r.channel_id
-         LEFT JOIN gateways g ON g.id = c.gateway_id
-         LEFT JOIN users u ON u.id = c.creator_user_id
-         WHERE r.bill_day = ? AND c.created_here = 1 ${scope}
-         ORDER BY c.upstream_id`,
-        [billDay, ...scopeParams],
-      )) as Row[])
-    : [];
-  const supplierIds = new Set<string>();
-  if (billDay) {
-    const ids = (await dbAll(
-      `SELECT c.id FROM channels c JOIN gateways g ON g.id = c.gateway_id WHERE g.kind = 'newapi_supplier' AND c.created_here = 1`,
-    )) as { id: string }[];
-    for (const idRow of ids) supplierIds.add(String(idRow.id));
+  const loaded = billDay ? await loadMergedRows(billDay, scope, scopeParams) : { storedRows: [] as Row[], merged: [] as Row[] };
+  const rows = loaded.storedRows;
+  const merged = loaded.merged;
+  const legacy = mode === "legacy";
+  let roles: Map<string, string> | null = null;
+  if (mode === "frozen" && billDay) {
+    const membership = (await dbAll("SELECT channel_id, role FROM billing_membership WHERE bill_day = ?", [billDay])) as Row[];
+    roles = new Map(membership.map((row) => [String(row.channel_id), String(row.role)]));
   }
-  const supplierChannels = billDay
-    ? ((await dbAll(
-        `SELECT c.id, c.name, c.group_name, c.type, u.name AS creator_name, c.imported_at, c.upstream_id, c.used_quota, c.balance,
-                COALESCE(g.disabled, 0) AS gateway_disabled, g.base_url AS gateway_base
-         FROM channels c JOIN gateways g ON g.id = c.gateway_id LEFT JOIN users u ON u.id = c.creator_user_id
-         WHERE g.kind = 'newapi_supplier' AND c.created_here = 1 ${scope}`,
-        scopeParams,
-      )) as Row[])
-    : [];
-  const supplierMeta = new Map(supplierChannels.map((row) => [String(row.id), row]));
-  const supplierRows = billDay
-    ? (await supplierBillRows(supplierChannels, billDay)).map((row) => {
-        const source = supplierMeta.get(String(row.channel_id));
-        return source
-          ? { ...row, upstream_id: source.upstream_id, gateway_disabled: source.gateway_disabled, gateway_base: source.gateway_base }
-          : row;
-      })
-    : [];
-  const merged = [...rows.filter((row) => !supplierIds.has(String(row.channel_id))), ...supplierRows];
-  const { counted: preferred, excluded } = partitionBillRows(merged);
+  const { preferred, excluded } = selectBillRows(merged, mode, roles);
   const visible = unsyncedOnly ? preferred.filter((row) => row.kind !== "amount") : preferred;
   const markers = billDay ? await rebindMarkers(visible.map((row) => String(row.channel_id)), billDay) : new Map();
-  const counted = preferred.filter((row) => consumptionOf(row) !== null);
+  const counted = legacy ? preferred.filter(legacyAmount) : preferred.filter((row) => consumptionOf(row) !== null);
   const unsynced = preferred.filter((row) => row.kind !== "amount");
-  const disabledGateway = rollupReadings(excluded);
-  const by = (key: string) => {
-    const map = new Map<string, number>();
-    for (const row of counted) {
-      const name = String(row[key] ?? "") || "unknown";
-      map.set(name, (map.get(name) ?? 0) + Number(row.consumption ?? 0));
-    }
-    return [...map.entries()].map(([name, value]) => ({ name, value })).sort((a, b) => b.value - a.value);
-  };
+  const disabledGateway = legacy
+    ? { channels: 0, readings: 0, consumption: null, complete: true }
+    : rollupReadings(excluded);
+  const balanceRows = legacy ? merged : preferred;
+  const nameOf = (key: string) => (row: Row) => String(row[key] ?? "") || "unknown";
   const trendRows = (await dbAll(
     `SELECT r.bill_day, r.label, r.span_days, r.consumption, r.kind, r.channel_id,
             c.upstream_id, COALESCE(g.disabled, 0) AS gateway_disabled, g.base_url AS gateway_base
@@ -675,6 +874,17 @@ export async function billingView(actor: SessionUser, options: BillingViewOption
      WHERE r.kind = 'amount' AND c.created_here = 1 ${scope}`,
     scopeParams,
   )) as Row[];
+  const runMeta = (await dbAll("SELECT bill_day, status, aggregation FROM billing_runs")) as Row[];
+  const membershipRows = (await dbAll("SELECT bill_day, channel_id, role FROM billing_membership")) as Row[];
+  const rolesByDay = new Map<string, Map<string, string>>();
+  for (const row of membershipRows) {
+    const day = String(row.bill_day);
+    const map = rolesByDay.get(day) ?? new Map<string, string>();
+    map.set(String(row.channel_id), String(row.role));
+    rolesByDay.set(day, map);
+  }
+  const modeFor = (day: string): BillAggregateMode =>
+    billAggregateMode(publishedRun(runMeta.filter((row) => String(row.bill_day) === day)));
   const counts = live
     ? await scopedCounts(String(live.baseline_day), actor)
     : { total: 0, ok: 0, failed: 0 };
@@ -693,10 +903,12 @@ export async function billingView(actor: SessionUser, options: BillingViewOption
       )) as { channel_id: string }[]).map((row) => row.channel_id)
     : [];
   const preferredIds = new Set(preferred.map((row) => String(row.channel_id)));
+  const reading = rollupReadings(preferred);
   return {
     copy: "schedule",
     requestedDay: requested || null,
     publication,
+    aggregation: legacy ? "legacy" : "dedup",
     collecting: live?.status === "collecting",
     suppliers:
       actor.role === "admin"
@@ -713,23 +925,17 @@ export async function billingView(actor: SessionUser, options: BillingViewOption
     unsyncedCount: unsynced.length,
     incomplete: unsynced.length > 0,
     disabledGateway,
+    reading,
     totalConsumption: counted.reduce((sum, row) => sum + Number(row.consumption ?? 0), 0),
-    totalTestQuota: preferred.reduce((sum, row) => sum + Number(row.test_quota ?? 0), 0),
-    showTestLine: rows.some((row) => preferredIds.has(String(row.channel_id)) && String(row.billing_mode ?? "") !== "snapshot"),
-    remainingBalance: preferred.reduce((sum, row) => sum + (row.balance === null || row.balance === undefined ? 0 : Number(row.balance)), 0),
-    usedUsd: preferred.reduce((sum, row) => sum + Number(row.used_quota ?? 0), 0) / QUOTA_PER_DOLLAR,
-    byType: (() => {
-      const map = new Map<string, number>();
-      for (const row of counted) {
-        const name = channelTypeName(Number(row.type ?? 0)) || "unknown";
-        map.set(name, (map.get(name) ?? 0) + Number(row.consumption ?? 0));
-      }
-      return [...map.entries()].map(([name, value]) => ({ name, value })).sort((a, b) => b.value - a.value);
-    })(),
-    bySupplier: by("creator_name"),
-    byChannel: by("name").slice(0, 8),
-    byGroup: by("group_name"),
-    trend: trendFrom(trendRows),
+    totalTestQuota: balanceRows.reduce((sum, row) => sum + Number(row.test_quota ?? 0), 0),
+    showTestLine: rows.some((row) => (legacy || preferredIds.has(String(row.channel_id))) && String(row.billing_mode ?? "") !== "snapshot"),
+    remainingBalance: balanceRows.reduce((sum, row) => sum + (row.balance === null || row.balance === undefined ? 0 : Number(row.balance)), 0),
+    usedUsd: balanceRows.reduce((sum, row) => sum + Number(row.used_quota ?? 0), 0) / QUOTA_PER_DOLLAR,
+    byType: groupSlices(preferred, (row) => channelTypeName(Number(row.type ?? 0)), legacy),
+    bySupplier: groupSlices(preferred, nameOf("creator_name"), legacy),
+    byChannel: groupSlices(preferred, nameOf("name"), legacy).slice(0, 8),
+    byGroup: groupSlices(preferred, nameOf("group_name"), legacy),
+    trend: trendFrom(trendRows, modeFor, (day) => rolesByDay.get(day)),
     rows: visible.map((row) => ({
       id: String(row.channel_id),
       name: String(row.name ?? ""),

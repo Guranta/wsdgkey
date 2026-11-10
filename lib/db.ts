@@ -6,11 +6,18 @@ import { databaseUrl, ensureDataDir, isPostgresUrl, sqliteFile } from "./paths";
 
 type Row = Record<string, unknown>;
 
+type Tx = {
+  get(statement: string, params?: unknown[]): Promise<Row | undefined>;
+  all(statement: string, params?: unknown[]): Promise<Row[]>;
+  run(statement: string, params?: unknown[]): Promise<void>;
+};
+
 type Sql = {
   exec(statement: string): Promise<void>;
   get(statement: string, params?: unknown[]): Promise<Row | undefined>;
   all(statement: string, params?: unknown[]): Promise<Row[]>;
   run(statement: string, params?: unknown[]): Promise<void>;
+  transaction<T>(fn: (tx: Tx) => Promise<T>): Promise<T>;
 };
 
 const SCHEMA = [
@@ -167,7 +174,14 @@ const SCHEMA = [
     published_at INTEGER,
     total_count INTEGER NOT NULL DEFAULT 0,
     ok_count INTEGER NOT NULL DEFAULT 0,
-    failed_count INTEGER NOT NULL DEFAULT 0
+    failed_count INTEGER NOT NULL DEFAULT 0,
+    aggregation TEXT
+  )`,
+  `CREATE TABLE IF NOT EXISTS billing_membership (
+    bill_day TEXT NOT NULL,
+    channel_id TEXT NOT NULL,
+    role TEXT NOT NULL,
+    PRIMARY KEY (bill_day, channel_id)
   )`,
   `CREATE TABLE IF NOT EXISTS billing_attempts (
     baseline_day TEXT NOT NULL,
@@ -350,7 +364,47 @@ function sqlite(): Sql {
     async run(statement, params = []) {
       db.prepare(statement).run(...params);
     },
+    transaction(fn) {
+      const run = sqliteTx.then(() => withSqliteTransaction(db, fn));
+      sqliteTx = run.then(
+        () => undefined,
+        () => undefined,
+      );
+      return run;
+    },
   };
+}
+
+let sqliteTx: Promise<void> = Promise.resolve();
+
+async function withSqliteTransaction<T>(db: DatabaseSync, fn: (tx: Tx) => Promise<T>): Promise<T> {
+  db.exec("BEGIN IMMEDIATE");
+  const tx: Tx = {
+    async get(statement, params = []) {
+      return asRow(db.prepare(statement).get(...(params as never[])));
+    },
+    async all(statement, params = []) {
+      return db
+        .prepare(statement)
+        .all(...(params as never[]))
+        .map((item: unknown) => asRow(item)!);
+    },
+    async run(statement, params = []) {
+      db.prepare(statement).run(...(params as never[]));
+    },
+  };
+  try {
+    const result = await fn(tx);
+    db.exec("COMMIT");
+    return result;
+  } catch (error) {
+    try {
+      db.exec("ROLLBACK");
+    } catch {
+      /* the transaction may already be closed */
+    }
+    throw error;
+  }
 }
 
 async function postgres(): Promise<Sql> {
@@ -370,6 +424,25 @@ async function postgres(): Promise<Sql> {
     },
     async run(statement, params = []) {
       await sql.unsafe(toPg(statement), params as never[]);
+    },
+    async transaction<T>(fn: (tx: Tx) => Promise<T>): Promise<T> {
+      const result = await sql.begin(async (txSql) => {
+        const tx: Tx = {
+          async get(statement, params = []) {
+            const rows = await txSql.unsafe(toPg(statement), params as never[]);
+            return asRow(rows[0]);
+          },
+          async all(statement, params = []) {
+            const rows = (await txSql.unsafe(toPg(statement), params as never[])) as unknown[];
+            return rows.map((item) => asRow(item)!);
+          },
+          async run(statement, params = []) {
+            await txSql.unsafe(toPg(statement), params as never[]);
+          },
+        };
+        return fn(tx);
+      });
+      return result as T;
     },
   };
 }
@@ -546,6 +619,8 @@ export async function ensureReady(): Promise<void> {
         ["missing_confirmed_at", "INTEGER"],
       ]);
       await addMissingColumns(db, "billing_rows", [["billing_mode", "TEXT NOT NULL DEFAULT ''"]]);
+      // Rule version. null = legacy, render stored rows. 'dedup' = new rules, frozen at publish. Later rules add a new value.
+      await addMissingColumns(db, "billing_runs", [["aggregation", "TEXT"]]);
       await db.exec(
         `INSERT INTO channel_bindings (id, record_id, gateway_id, newapi_channel_id, bound_at, reason, bind_snapshot)
          SELECT 'seed-' || id, id, gateway_id, upstream_id, created_at, 'seed', COALESCE(create_baseline, used_quota)
@@ -574,6 +649,11 @@ export async function dbAll(statement: string, params: unknown[] = []): Promise<
 export async function dbRun(statement: string, params: unknown[] = []): Promise<void> {
   await ensureReady();
   return (await sql()).run(statement, params);
+}
+
+export async function dbTransaction<T>(fn: (tx: Tx) => Promise<T>): Promise<T> {
+  await ensureReady();
+  return (await sql()).transaction(fn);
 }
 
 export function resetDatabaseForTests(): void {

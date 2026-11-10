@@ -1,9 +1,9 @@
 "use client";
 
-import { BillDayControl, BillPeriod, billFindingText, billLabelText, useBillingBill, type BillRow } from "@/components/billing-view";
+import { BillDayControl, BillPeriod, billFindingText, billLabelText, readingsNote, useBillingBill, type BillRow } from "@/components/billing-view";
 import { useConnections } from "@/components/providers";
 import { Alert, buttonClass, Card, PageHeader } from "@/components/ui";
-import { disabledGatewayAmountText } from "@/lib/billing-query";
+import { grandTotalLabel, groupSubtotalText, readingAmountText } from "@/lib/billing-query";
 import { channelTypeOption } from "@/lib/channel-types";
 import { formatUsd } from "@/lib/format";
 import { formatShanghaiTime } from "@/lib/shanghai";
@@ -23,6 +23,7 @@ export function BillsView() {
   if (!hydrated || !bill) return <p className="text-sm text-muted">{t("loading")}</p>;
   const money = (value: number) => formatUsd(value, locale);
   const cell = (value: number | null) => (value === null ? "—" : money(value));
+  const dedup = bill.aggregation === "dedup";
   const summed = (rows: BillRow[], key: "today" | "before" | "cumulative") => {
     const values = rows.map((row) => row[key]);
     const present = values.filter((value): value is number => value !== null && value !== undefined);
@@ -31,6 +32,8 @@ export function BillsView() {
     const amount = present.reduce((total, value) => total + value, 0);
     return missing ? `${money(amount)} · ${t("incomplete")}` : money(amount);
   };
+  const groupToday = (rows: BillRow[]) =>
+    dedup ? groupSubtotalText(rows, money, t("missingData"), readingsNote(t)) : summed(rows, "today");
   const unpublished = bill.publication === "unpublished" || (Boolean(bill.requestedDay) && !bill.billDay);
   const max = Math.max(1, ...bill.trend.map((item) => item.value));
   const typeGroups = new Map<string, BillRow[]>();
@@ -120,7 +123,7 @@ export function BillsView() {
                           <span className="font-normal text-muted">{t("sectionCount", { count: rows.length })}</span>
                         </span>
                       </td>
-                      <td className="whitespace-nowrap px-4 py-2 text-[13px] font-semibold tabular-nums">{summed(rows, "today")}</td>
+                      <td className="whitespace-nowrap px-4 py-2 text-[13px] font-semibold tabular-nums">{groupToday(rows)}</td>
                       <td className="whitespace-nowrap px-4 py-2 text-[13px] font-semibold tabular-nums">{summed(rows, "before")}</td>
                       <td className="whitespace-nowrap px-4 py-2 text-[13px] font-semibold tabular-nums">{summed(rows, "cumulative")}</td>
                     </tr>
@@ -152,17 +155,17 @@ export function BillsView() {
                     <td className="whitespace-nowrap px-4 py-3 text-xs tabular-nums">{money(bill.totalTestQuota)}</td>
                   </tr>
                   <tr className="border-t border-line font-semibold">
-                    <td className="px-4 py-3">{t("grandTotal")}{bill.incomplete ? ` · ${t("incomplete")}` : ""}</td>
-                    <td className="whitespace-nowrap px-4 py-3 tabular-nums">{summed(allRows, "today")}</td>
+                    <td className="px-4 py-3">{grandTotalLabel(bill.aggregation, Boolean(bill.incomplete), t("grandTotal"), t("incomplete"))}</td>
+                    <td className="whitespace-nowrap px-4 py-3 tabular-nums">{groupToday(allRows)}</td>
                     <td className="whitespace-nowrap px-4 py-3 tabular-nums">{summed(allRows, "before")}</td>
                     <td className="whitespace-nowrap px-4 py-3 tabular-nums">{summed(allRows, "cumulative")}</td>
                   </tr>
                 </>
               ) : null}
-              {bill.disabledGateway?.channels ? (
+              {dedup && bill.disabledGateway?.channels ? (
                 <tr className="border-t border-line text-muted">
                   <td className="px-4 py-3">{t("disabledGatewayExcluded")}</td>
-                  <td className="whitespace-nowrap px-4 py-3 tabular-nums">{disabledGatewayAmountText(bill.disabledGateway, money, t("missingData"), t("incomplete"))}</td>
+                  <td className="whitespace-nowrap px-4 py-3 tabular-nums">{readingAmountText(bill.disabledGateway, money, t("missingData"), readingsNote(t))}</td>
                   <td className="px-4 py-3">—</td>
                   <td className="px-4 py-3">—</td>
                 </tr>

@@ -197,9 +197,10 @@
 - **处理**：只有上游给出明确的有限 total、本次扫描收集到的不重复 id 数量正好等于这个 total、且没有任何一页失败，才算列表结束，才允许把没见到的行标成不存在。空页、total 缺失或不一致、任何错误都中止本轮：不改 `upstream_missing`，不写 gateway-done。进行中的扫描不会被 5 分钟间隔打回第 1 页，多个网关轮流翻页。401 和 403 都强制刷新一次并重试一次，但每个网关 60 秒内只强制续期一次，并发请求共用同一次续期；冷却期内再次 401/403 不再登录，只记拉取失败，下一轮再试。仍失败只记拉取失败，渠道保留上次状态并显示「状态未更新」。已停用网关的行显示「已停用网关 · 不同步」，不计入拉取失败。某日没有快照显示「缺数据」，账单合计标「不完整」。管理员可 `POST /api/admin/supplier-snapshots`，只补当天还没有快照的渠道，不覆盖已有行，也不写过去的日期。
 - **位置**：`lib/list-sweep.ts`；`lib/channel-service.ts` 的 `syncGatewayPage`、`finishGatewayList`；`lib/jobs.ts`；`lib/seller-auth.ts` 的 `sellerRequest`；`lib/supplier-billing.ts`；`lib/billing-service.ts` 的 `pullSellerBaseline`；`app/api/admin/supplier-snapshots/route.ts`。
 
-## 28. 账单合计要去重，停用网关不进合计
+## 28. 已发布账单按发布时展示；去重和停用拆分只用于未发布的账期
 
-- **症状**：同一条上游渠道挂在两个网关上时，总消耗、按分组、按类型、按供应商和已用美元比网关上的数大一倍。已经停用的网关仍被加进这些合计，钱像是消失了，因为明细里又没有单独交代。
-- **原因**：本地可以给同一个上游渠道（相同 `upstream_id`，且网关站点地址归一化后相同）各存一行。视图如果按行相加就会算两次。停用只是网关不再同步，历史账单行还在。
-- **处理**：只改展示和汇总，不改已经发布的 `billing_rows` 和快照。去重键是归一化后的上游站点（`base_url`）加上上游渠道 id；同一上游渠道在合计里只留一行，优先用仍启用的网关那一行。停用网关的金额从上述合计拿掉，账单上单独放一行灰色「已停用网关（不计入合计）」。这一行若没有读数，显示「缺数据」，不显示 $0；只有一部分渠道有读数时，金额后面加「不完整」。总览的异常计数同样只算启用中的网关；`upstream_missing = 1` 只算「网关上找不到」，不重复算进拉取失败、降频或未同步。停用网关另有一行「已停用网关 · 不同步」。
-- **位置**：`lib/billing-service.ts` 的 `billingView`；`lib/channel-service.ts` 的 `loadStats`。
+- **症状**：11-09 这种已经发布的账单，渠道数和分组跟发布时对不上。Vertex AI 从 4021 条变成 1808 条，OpenAI、Anthropic、AWS、Gemini 整组进了灰色的「已停用网关（不计入合计）」。
+- **原因**：去重和停用拆分如果在读账单时现算，用的是现在的网关停用状态。已经发布的 `billing_rows` 没改，但展示被改了。已发布账单是对外记录，不能随后续的网关状态变。
+- **处理**：`billing_runs.aggregation` 是规则版本，不是开关。空值表示 legacy：按当时写下的行原样展示，不去重，不停用拆分，不显示灰色停用行。`dedup` 表示这一版规则：归一化站点（`base_url`）加上游渠道 id 去重，启用网关优先，停用网关不进合计，单独一行灰色「已停用网关（不计入合计）」，并在发布时把计入 / 排除 / 重复冻进 `billing_membership`。以后的规则加新的取值，不复用这两个。明细和趋势图走同一个 `billAggregateMode`。账单日早于 `DEDUP_RULE_START`（2026-11-10）、已发布且版本为空的，维持 legacy，读的时候也不补版本，趋势里这一天也不去重、不拆停用。账单日大于等于 2026-11-10、已发布但版本仍为空的，第一次被读到时（总览、账单明细、趋势里的那一天都算）按当时的网关状态算一次去重和停用拆分，写入 `billing_membership`，并把版本改成 `dedup`。这一步在事务里完成：`INSERT ... ON CONFLICT DO NOTHING`，再 `UPDATE ... WHERE aggregation IS NULL`。并发的第一次打开只会留下同一份成员关系，之后再停用网关也不改这天的明细和趋势柱。未发布的账期按 `dedup` 现算。`ensureBillingRun` 在上海时间 06:00（或基线已经拉完）调用 `publishBill`。这一次如果该运行还没发布，就写成 `dedup`。2026-11-10 是第一张按新规则发布的账单（11 日 06:00 发布）。新规则下账单表的「合计」不再另加「· 不完整」，金额格已经写了「不完整（n/总数 有读数）」；2026-11-09 及更早的已发布空版本仍按原来的合计文案。供应商金额仍由 `supplierBillRows` 现算，这次不冻金额。在另案把已发布日的供应商金额也冻住之前，不要对已发布账期调用 `POST /api/admin/supplier-snapshots`：那个接口补的是当天快照，会改掉已经发布的账单上仍在现算的供应商金额。
+- 读数：`kind = amount` 且 `consumption` 是有限数（含 0）才算有读数。未同步、缺行不当成 0。没有读数显示「缺数据」；每个渠道都有读数显示金额；只有一部分显示「$X.XX · 不完整（n/总数 有读数）」，例如「$0.00 · 不完整（4/635 有读数）」。分组小计和灰色行用同一格式。接口给出 `disabledGateway.readings`，以及 `byType` / `byGroup` 上每个分组的 `readings` 和 `channels`。
+- **位置**：`lib/billing-service.ts` 的 `billingView`、`publishBill`；`lib/billing-query.ts` 的 `readingAmountText`、`groupSubtotalText`。总览的异常计数仍然只算启用中的网关；`upstream_missing = 1` 只算「网关上找不到」，不重复算进拉取失败、降频或未同步（`lib/channel-service.ts` 的 `loadStats`）。停用网关在渠道列表另有一行「已停用网关 · 不同步」。
