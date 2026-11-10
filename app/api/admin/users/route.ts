@@ -12,6 +12,9 @@ function listed(users: Awaited<ReturnType<typeof listUsers>>) {
     disabled: item.disabled,
     createdAt: item.createdAt,
     channelCount: item.channelCount ?? 0,
+    parentUserId: item.parentUserId,
+    subCount: item.subCount ?? 0,
+    lastLoginAt: item.lastLoginAt,
   }));
 }
 

@@ -1,11 +1,12 @@
 "use client";
 
 import { useConnections } from "@/components/providers";
+import { SubAccountsPanel } from "@/components/sub-accounts-panel";
 import { Alert, Avatar, buttonClass, Card, fieldClass, PageHeader, useIsClient } from "@/components/ui";
 import { formatTimestamp } from "@/lib/format";
 import { useLocale, useTranslations } from "next-intl";
 import { useRouter } from "next/navigation";
-import { useEffect, useState } from "react";
+import { Fragment, useEffect, useState } from "react";
 
 type UserRow = {
   id: string;
@@ -15,6 +16,8 @@ type UserRow = {
   disabled: boolean;
   createdAt: number;
   channelCount: number;
+  parentUserId?: string | null;
+  subCount?: number;
 };
 
 const EMPTY = { username: "", name: "", password: "" };
@@ -36,6 +39,7 @@ export function AdminUsersView() {
   const [form, setForm] = useState(EMPTY);
   const [resetId, setResetId] = useState("");
   const [nextPassword, setNextPassword] = useState("");
+  const [openSubs, setOpenSubs] = useState("");
 
   async function load() {
     const res = await fetch("/api/admin/users", { cache: "no-store" });
@@ -162,6 +166,7 @@ export function AdminUsersView() {
   if (!hydrated || !ready) return <p className="text-sm text-muted">{t("loading")}</p>;
   if (user?.role !== "admin") return <Alert tone="danger">{t("adminOnly")}</Alert>;
   const columns = [t("columns.username"), t("columns.name"), t("columns.role"), t("columns.channels"), t("columns.status"), t("columns.created"), t("columns.actions")];
+  const visible = rows.filter((row) => !row.parentUserId);
 
   return (
     <div>
@@ -217,8 +222,9 @@ export function AdminUsersView() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-line">
-                {rows.map((row) => (
-                  <tr key={row.id}>
+                {visible.map((row) => (
+                  <Fragment key={row.id}>
+                  <tr>
                     <td className="whitespace-nowrap px-4 py-3 font-medium">
                       <span className="inline-flex items-center gap-2">
                         <Avatar name={row.name || row.username} seed={row.username} size="sm" />
@@ -268,9 +274,22 @@ export function AdminUsersView() {
                         <button type="button" className={buttonClass("secondary", "h-8")} disabled={busyId === row.id} onClick={() => void logoutDevices(row)}>
                           {t("logoutAll")}
                         </button>
+                        {row.role === "supplier" ? (
+                          <button type="button" className={buttonClass("secondary", "h-8")} onClick={() => setOpenSubs((current) => current === row.id ? "" : row.id)}>
+                            {t("subCount", { count: row.subCount ?? 0 })}
+                          </button>
+                        ) : null}
                       </div>
                     </td>
                   </tr>
+                  {row.role === "supplier" && openSubs === row.id ? (
+                    <tr>
+                      <td colSpan={columns.length} className="bg-canvas px-4 py-4">
+                        <SubAccountsPanel parentId={row.id} embedded onChanged={() => void load()} />
+                      </td>
+                    </tr>
+                  ) : null}
+                  </Fragment>
                 ))}
               </tbody>
             </table>

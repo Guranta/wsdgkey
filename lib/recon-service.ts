@@ -3,6 +3,7 @@ import { dbAll, dbGet, dbRun } from "./db";
 import { getGateway } from "./gateways";
 import { reconPolicy } from "./settings";
 import { addDays, logWindow } from "./shanghai";
+import { scopeOwnerId } from "./scope";
 import type { SessionUser } from "./types";
 
 type Row = Record<string, unknown>;
@@ -214,11 +215,12 @@ async function ownedRow(actor: SessionUser, id: string): Promise<Row> {
     [id],
   );
   if (!row) throw fail("reconMissing", 404);
-  if (actor.role !== "admin" && String(row.creator_user_id) !== actor.id) throw fail("forbidden", 403);
+  if (actor.role !== "admin" && String(row.creator_user_id) !== scopeOwnerId(actor)) throw fail("forbidden", 403);
   return row;
 }
 
 export async function applyReconAction(actor: SessionUser, body: Record<string, unknown>): Promise<void> {
+  if (actor.parentUserId) throw fail("forbidden", 403);
   const action = String(body.action ?? "");
   if (action === "lock") {
     if (actor.role !== "admin") throw fail("forbidden", 403);
@@ -298,8 +300,9 @@ export async function reconPage(actor: SessionUser, month: string | null) {
     )) as { channel_id: string }[];
     for (const channel of channels) await syncReconChannel(day, channel.channel_id);
   }
+  const ownerId = scopeOwnerId(actor);
   const scope = actor.role === "admin" ? "" : "AND c.creator_user_id = ?";
-  const params = selected ? [selected, ...(actor.role === "admin" ? [] : [actor.id])] : [];
+  const params = selected ? [selected, ...(actor.role === "admin" ? [] : [ownerId])] : [];
   const rows = selected
     ? ((await dbAll(
         `SELECT q.*, c.name, c.group_name, c.upstream_id, g.name AS gateway_name, u.name AS supplier_name
@@ -316,7 +319,7 @@ export async function reconPage(actor: SessionUser, month: string | null) {
     ? ((await dbAll(
         `SELECT a.* FROM recon_adjustments a JOIN channels c ON c.id = a.channel_id
          WHERE a.bill_day LIKE ? ${scope} ORDER BY a.created_at`,
-        [`${selected}%`, ...(actor.role === "admin" ? [] : [actor.id])],
+        [`${selected}%`, ...(actor.role === "admin" ? [] : [ownerId])],
       )) as Row[])
     : [];
   const byChannel = new Map<string, ReconAdjustment[]>();
@@ -439,7 +442,7 @@ export async function reconPage(actor: SessionUser, month: string | null) {
      LEFT JOIN users u ON u.id = c.creator_user_id
      WHERE c.created_here = 1 AND c.upstream_missing = 1 AND c.missing_handled = 0 ${missingScope}
      ORDER BY c.upstream_id`,
-    actor.role === "admin" ? [] : [actor.id],
+    actor.role === "admin" ? [] : [ownerId],
   )) as Row[];
   return {
     month: selected,

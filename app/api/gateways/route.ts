@@ -6,6 +6,7 @@ import { readJson } from "@/lib/http";
 export async function GET() {
   const user = await currentUser();
   if (!user) return apiError("loginRequired", 401);
+  if (user.parentUserId) return apiError("forbidden", 403);
   const rows = user.role === "admin" ? await listGateways() : await listOwnSellerGateways(user);
   return Response.json(rows, { headers: { "cache-control": "no-store" } });
 }
@@ -13,6 +14,7 @@ export async function GET() {
 export async function POST(req: Request) {
   const user = await currentUser();
   if (!user) return apiError("loginRequired", 401);
+  if (user.parentUserId) return apiError("forbidden", 403);
   const body = (await readJson(req)) as Record<string, unknown> | null;
   try {
     if (body?.kind === "newapi_seller") {

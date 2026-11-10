@@ -41,6 +41,7 @@
     "billing": "总览",
     "recon": "对账",
     "users": "用户管理",
+    "subAccounts": "子账户",
     "settings": "设置",
     "bills": "账单"
   },
@@ -83,6 +84,11 @@
     "nameRequired": "请填写显示名称",
     "passwordInvalid": "密码至少 8 位，且不能有空格",
     "usernameTaken": "这个用户名已经存在",
+    "subAccountNested": "子账户不能再创建下级",
+    "parentRequired": "请选择父供应商",
+    "parentInvalid": "只能在供应商名下创建子账户",
+    "subAccountTransfer": "不能把子账户改挂到别的供应商",
+    "subAccountMissing": "子账户不存在",
     "specifyUpdate": "请指定停用状态或新密码",
     "cannotDisableSelf": "不能停用自己的账号",
     "userMissing": "用户不存在",
@@ -696,7 +702,8 @@
     "supplierTlsNote": "该站若以 IP + 自签证书提供 HTTPS，需由部署者为该主机配置证书例外（tls_exception_host），否则连接会失败。",
     "supplierSaveTests": "保存时会用该账号实际登录一次以验证凭据。",
     "needRelogin": "需重新登录",
-    "supplierReloginTip": "会话失效，请到设置 › 网关重新填写账号密码并测试连接"
+    "supplierReloginTip": "会话失效，请到设置 › 网关重新填写账号密码并测试连接",
+    "subAccountHint": "可以修改自己的密码。渠道和账单与主账号相同，不能管理网关。"
   },
   "users": {
     "loading": "正在读取账号…",
@@ -705,7 +712,7 @@
     "title": "用户",
     "description": "管理员创建供应商、重置密码或停用账号。没有公开注册。停用后不能登录。",
     "createTitle": "新建供应商",
-    "createHint": "只能创建供应商。没有普通用户，也不能在这里开子账号。",
+    "createHint": "只能创建供应商。子账户在对应供应商行里代为管理，不能改挂到别的供应商。",
     "username": "用户名",
     "displayName": "显示名称",
     "namePlaceholder": "华东供应商",
@@ -733,7 +740,38 @@
     "logoutAll": "退出全部设备",
     "loggedOutAll": "已让 {username} 的全部设备退出。",
     "resetSelf": "密码已更新，请重新登录。",
-    "resetOther": "已重置 {username} 的密码。"
+    "resetOther": "已重置 {username} 的密码。",
+    "subCount": "子账户 {count}"
+  },
+  "subAccounts": {
+    "title": "子账户",
+    "description": "子账户与你共用渠道与账单范围，可以上 key；不能管理网关，也不能再创建下级。",
+    "create": "创建子账户",
+    "empty": "还没有子账户，点击「创建子账户」添加",
+    "username": "用户名",
+    "password": "密码",
+    "showPassword": "显示",
+    "hidePassword": "隐藏",
+    "hint": "子账户与你共用渠道与账单范围，可以上 key；不能管理网关，也不能再创建下级。",
+    "created": "已创建子账户 {username}",
+    "columns": {
+      "username": "用户名",
+      "status": "状态",
+      "lastLogin": "最后登录",
+      "actions": "操作"
+    },
+    "enabled": "启用",
+    "disabled": "已停用",
+    "disable": "停用",
+    "enable": "启用",
+    "reset": "重置密码",
+    "disableTitle": "停用子账户",
+    "disableBody": "停用后该账号无法登录，已上的 key 仍归你名下",
+    "resetTitle": "重置密码",
+    "resetBody": "为 {username} 设置新密码。密码不会出现在列表里。",
+    "resetDone": "已重置密码",
+    "loading": "正在读取子账户…",
+    "parentOnly": "只有供应商可以管理自己的子账户。"
   },
   "system": {
     "errorTitle": "页面出错了",

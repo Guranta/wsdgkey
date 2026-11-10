@@ -152,6 +152,7 @@ export function ReconView() {
     );
   }
   const admin = user?.role === "admin";
+  const readOnly = Boolean(user?.parentUserId);
   const pendingLabel = tab === "daily" ? t("pendingWork") : t("pending");
   const slices = [
     ["match", data.counts.match, t("match")],
@@ -266,7 +267,7 @@ export function ReconView() {
                         {row.supplierNote ? <span>{row.supplierNote}</span> : null}
                         {row.adminResolution ? <span>{t("resolved")}{row.adminNote ? ` · ${row.adminNote}` : ""}</span> : null}
                         {row.adjustments.map((item) => <span key={item.id}>{t("adjustment", { amount: money(item.amountQuota, row.quotaPerUnit, locale) })} {item.note}</span>)}
-                        {!admin && !row.locked ? (
+                        {!admin && !readOnly && !row.locked ? (
                           <>
                             <button type="button" className={buttonClass("ghost", "h-7 px-2")} onClick={() => void act({ action: "confirm", id: row.id })}>{t("confirm")}</button>
                             <button type="button" className={buttonClass("ghost", "h-7 px-2")} onClick={() => setDraft({ id: row.id, action: "dispute", note: "", amount: "" })}>{t("dispute")}</button>

@@ -7,6 +7,7 @@ import { readJson } from "@/lib/http";
 export async function POST(req: Request) {
   const user = await currentUser();
   if (!user) return apiError("loginRequired", 401);
+  if (user.parentUserId) return apiError("forbidden", 403);
   const body = (await readJson(req)) as Record<string, unknown> | null;
   try {
     const result = await probeGatewayLogin({

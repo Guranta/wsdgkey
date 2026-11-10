@@ -41,6 +41,7 @@
     "billing": "Overview",
     "recon": "Reconciliation",
     "users": "Users",
+    "subAccounts": "Sub-accounts",
     "settings": "Settings",
     "bills": "Bills"
   },
@@ -83,6 +84,11 @@
     "nameRequired": "Enter a display name",
     "passwordInvalid": "Passwords need at least 8 characters and no spaces",
     "usernameTaken": "That username is already taken",
+    "subAccountNested": "A sub-account cannot create another sub-account",
+    "parentRequired": "Choose the parent supplier",
+    "parentInvalid": "Sub-accounts can only be created under a supplier",
+    "subAccountTransfer": "A sub-account cannot be moved to another supplier",
+    "subAccountMissing": "That sub-account does not exist",
     "specifyUpdate": "Choose a disabled state or a new password",
     "cannotDisableSelf": "You cannot disable your own account",
     "userMissing": "That user does not exist",
@@ -696,7 +702,8 @@
     "supplierTlsNote": "If the site serves HTTPS with an IP + self-signed certificate, the deployer must set a per-host TLS exception (tls_exception_host) or the connection will fail.",
     "supplierSaveTests": "Saving performs a real login once to verify the credentials.",
     "needRelogin": "Re-login needed",
-    "supplierReloginTip": "Session expired; re-enter the account password under Settings › Gateways and test the connection"
+    "supplierReloginTip": "Session expired; re-enter the account password under Settings › Gateways and test the connection",
+    "subAccountHint": "You can change your own password. Channels and bills match the parent account. Gateways cannot be managed."
   },
   "users": {
     "loading": "Loading accounts…",
@@ -705,7 +712,7 @@
     "title": "Users",
     "description": "Admins create suppliers, reset passwords, and disable accounts. There is no public registration. Disabled accounts cannot sign in.",
     "createTitle": "New supplier",
-    "createHint": "This creates a supplier. There is no separate end-user role.",
+    "createHint": "This creates a supplier. Sub-accounts are managed on that supplier's row and cannot be moved to another supplier.",
     "username": "Username",
     "displayName": "Display name",
     "namePlaceholder": "East supplier",
@@ -733,7 +740,38 @@
     "logoutAll": "Log out all devices",
     "loggedOutAll": "Signed {username} out of every device.",
     "resetSelf": "Password updated. Sign in again.",
-    "resetOther": "Reset the password for {username}."
+    "resetOther": "Reset the password for {username}.",
+    "subCount": "Sub-accounts {count}"
+  },
+  "subAccounts": {
+    "title": "Sub-accounts",
+    "description": "A sub-account shares your channels and bills, and can add keys. It cannot manage gateways or create further sub-accounts.",
+    "create": "Create sub-account",
+    "empty": "No sub-accounts yet. Click “Create sub-account” to add one.",
+    "username": "Username",
+    "password": "Password",
+    "showPassword": "Show",
+    "hidePassword": "Hide",
+    "hint": "A sub-account shares your channels and bills, and can add keys. It cannot manage gateways or create further sub-accounts.",
+    "created": "Created sub-account {username}",
+    "columns": {
+      "username": "Username",
+      "status": "Status",
+      "lastLogin": "Last sign-in",
+      "actions": "Actions"
+    },
+    "enabled": "Enabled",
+    "disabled": "Deactivated",
+    "disable": "Deactivate",
+    "enable": "Enable",
+    "reset": "Reset password",
+    "disableTitle": "Deactivate sub-account",
+    "disableBody": "After deactivation this account cannot sign in; keys already added stay under you.",
+    "resetTitle": "Reset password",
+    "resetBody": "Set a new password for {username}. The password is not shown in the list.",
+    "resetDone": "Password reset",
+    "loading": "Loading sub-accounts…",
+    "parentOnly": "Only a supplier can manage their own sub-accounts."
   },
   "system": {
     "errorTitle": "This page failed",

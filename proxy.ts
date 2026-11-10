@@ -92,6 +92,13 @@ export async function proxy(request: NextRequest) {
   }
 
   const adminPage = pathname === "/users" || pathname.startsWith("/admin");
+  const subAccountPage = pathname === "/sub-accounts" || pathname.startsWith("/sub-accounts/");
+  if (subAccountPage && (user?.role !== "supplier" || user.parentUserId)) {
+    const htmlLang = spoken === "en" ? "en-US" : "zh-CN";
+    const title = "万事大吉 v2.1";
+    const html = `<!DOCTYPE html><html lang="${htmlLang}"><head><meta charset="utf-8"><title>${title}</title></head><body><h1>${message(spoken, "pageForbidden")}</h1></body></html>`;
+    return withSecurity(new NextResponse(html, { status: 403, headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" } }));
+  }
   if (adminPage && user?.role !== "admin") {
     const htmlLang = spoken === "en" ? "en-US" : "zh-CN";
     const title = "万事大吉 v2.1";

@@ -5,7 +5,7 @@ import { clientIp, clearUsernameFailures, loginRateLimited, loginUsernameKey, re
 import { isLocale, localeCookieHeader } from "@/lib/locale";
 import { getSession } from "@/lib/session";
 import { createServerSession } from "@/lib/session-store";
-import { publicUser, authenticate } from "@/lib/users";
+import { publicUser, authenticate, recordLogin } from "@/lib/users";
 
 async function tooMany(retryAfter: number): Promise<Response> {
   return Response.json(
@@ -33,6 +33,7 @@ export async function POST(req: Request) {
     return apiError(result === "disabled" ? "accountDisabled" : "invalidCredentials", result === "disabled" ? 403 : 401);
   }
   clearUsernameFailures(usernameKey);
+  await recordLogin(result.id);
   const sessionId = await createServerSession(result.id);
   const session = await getSession();
   session.sessionId = sessionId;

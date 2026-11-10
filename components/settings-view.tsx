@@ -53,6 +53,7 @@ export function SettingsView() {
   const [notice, setNotice] = useState("");
   const [busy, setBusy] = useState(false);
   const admin = user?.role === "admin";
+  const subAccount = Boolean(user?.parentUserId);
 
   async function load() {
     const limitRes = admin ? await fetch("/api/settings", { cache: "no-store" }) : null;
@@ -67,13 +68,13 @@ export function SettingsView() {
   }
 
   useEffect(() => {
-    if (!ready) return;
+    if (!ready || subAccount) return;
     const timer = window.setTimeout(() => {
       void load();
     }, 0);
     return () => window.clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ready, admin]);
+  }, [ready, admin, subAccount]);
 
   const dirty = admin && JSON.stringify(limits) !== JSON.stringify(saved);
   const seller = form.kind === "newapi_seller";
@@ -200,8 +201,8 @@ export function SettingsView() {
 
   return (
     <div className="mx-auto max-w-[640px] pb-24">
-      <PageHeader title={t("title")} description={!admin || gatewaysLoaded ? t(introKey) : undefined} />
-      {alerts.map((item) => (
+      <PageHeader title={t("title")} description={subAccount ? t("subAccountHint") : !admin || gatewaysLoaded ? t(introKey) : undefined} />
+      {subAccount ? null : alerts.map((item) => (
         <div key={item.id} className="mb-4 rounded-control bg-warn-soft px-4 py-3 text-sm leading-5 break-words text-warn">
           {t("renewalBanner", {
             name: item.name,
@@ -225,7 +226,7 @@ export function SettingsView() {
           <button type="submit" className={buttonClass("primary")} disabled={busy}>{t("updatePassword")}</button>
         </form>
       </Card>
-      {admin ? (
+      {subAccount ? null : admin ? (
         <Card className="mb-4 p-5">
           <h2 className="text-sm font-medium">{t("site")}</h2>
           <label className="mt-4 block text-sm">
@@ -234,7 +235,7 @@ export function SettingsView() {
           </label>
         </Card>
       ) : null}
-      <Card className="mb-4 p-5">
+      {subAccount ? null : <Card className="mb-4 p-5">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <h2 className="text-sm font-medium">{t("gateways")}</h2>
           <button type="button" className={buttonClass("primary", "h-9")} onClick={() => openAdd()}>{t("addGateway")}</button>
@@ -291,8 +292,8 @@ export function SettingsView() {
             );
           })}
         </ul>
-      </Card>
-      {admin ? (
+      </Card>}
+      {subAccount ? null : admin ? (
         <>
           <Card className="mb-4 p-5">
             <h2 className="text-sm font-medium">{t("limits")}</h2>
@@ -311,10 +312,12 @@ export function SettingsView() {
           </Card>
         </>
       ) : null}
-      <Card className="p-5">
-        <h2 className="text-sm font-medium">{t("scheduleTitle")}</h2>
-        <p className="mt-2 text-sm text-secondary">{t("scheduleBody")}</p>
-      </Card>
+      {subAccount ? null : (
+        <Card className="p-5">
+          <h2 className="text-sm font-medium">{t("scheduleTitle")}</h2>
+          <p className="mt-2 text-sm text-secondary">{t("scheduleBody")}</p>
+        </Card>
+      )}
       {adding ? (
         <div className="fixed inset-0 z-50 flex justify-end bg-foreground/35">
           <form className="flex h-full w-full max-w-[440px] flex-col bg-card p-5" onSubmit={(event) => { event.preventDefault(); void addGateway(); }}>

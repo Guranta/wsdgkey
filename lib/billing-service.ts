@@ -8,6 +8,7 @@ import { syncReconChannel } from "./recon-service";
 import { rebindMarkers } from "./rebind";
 import { rateLimits } from "./settings";
 import { addDays, formatShanghaiTime, logWindow, shanghaiClock, shanghaiMidnight } from "./shanghai";
+import { scopeOwnerId } from "./scope";
 import type { SessionUser } from "./types";
 import { gatewayApi } from "./gateway-adapter";
 import { fetchUpstreamChannel, testLogQuota, todayQuota, UpstreamFailure } from "./upstream";
@@ -504,7 +505,7 @@ export async function billingView(actor: SessionUser, options: BillingViewOption
   const billDay = showing ? String(showing.bill_day) : null;
   const scopedToSupplier = actor.role !== "admin" || Boolean(options.supplierId);
   const scopeSupplier = scopedToSupplier ? "AND c.creator_user_id = ?" : "";
-  const scopeParams = scopedToSupplier ? [actor.role === "admin" ? String(options.supplierId) : actor.id] : [];
+  const scopeParams = scopedToSupplier ? [actor.role === "admin" ? String(options.supplierId) : scopeOwnerId(actor)] : [];
   const scope = scopeSupplier;
   const rows = billDay
     ? ((await dbAll(
@@ -651,7 +652,7 @@ export async function billingView(actor: SessionUser, options: BillingViewOption
 
 async function scopedCounts(baselineDay: string, actor: SessionUser): Promise<{ total: number; ok: number; failed: number }> {
   const scope = actor.role === "admin" ? "" : "AND c.creator_user_id = ?";
-  const params = actor.role === "admin" ? [] : [actor.id];
+  const params = actor.role === "admin" ? [] : [scopeOwnerId(actor)];
   const total = Number((await dbGet(`SELECT COUNT(*) AS n FROM channels c WHERE c.created_here = 1 ${scope}`, params))?.n ?? 0);
   const ok = Number(
     (await dbGet(
@@ -673,7 +674,7 @@ export async function reconView(actor: SessionUser) {
   const showing = published[0];
   const billDay = showing ? String(showing.bill_day) : null;
   const scope = actor.role === "admin" ? "" : "AND c.creator_user_id = ?";
-  const scopeParams = actor.role === "admin" ? [] : [actor.id];
+  const scopeParams = actor.role === "admin" ? [] : [scopeOwnerId(actor)];
   const rows = billDay
     ? ((await dbAll(
         `SELECT r.*, c.name, c.group_name, u.name AS creator_name
@@ -723,11 +724,11 @@ export type SnapshotCell = { kind: "amount"; quota: number } | { kind: "missing"
 export async function sellerSnapshotGrid(actor: SessionUser, gatewayId: string) {
   const gateway = await getGateway(gatewayId);
   if (!gateway || gateway.kind !== "newapi_seller") return null;
-  if (actor.role !== "admin" && gateway.ownerUserId !== actor.id) return null;
+  if (actor.role !== "admin" && gateway.ownerUserId !== scopeOwnerId(actor)) return null;
   const today = shanghaiClock().day;
   const days = Array.from({ length: 7 }, (_, index) => addDays(today, index - 7));
   const scope = actor.role === "admin" ? "" : "AND creator_user_id = ?";
-  const params = actor.role === "admin" ? [gatewayId] : [gatewayId, actor.id];
+  const params = actor.role === "admin" ? [gatewayId] : [gatewayId, scopeOwnerId(actor)];
   const channels = (await dbAll(
     `SELECT id, name, upstream_id, origin FROM channels WHERE gateway_id = ? AND created_here = 1 ${scope} ORDER BY upstream_id`,
     params,
