@@ -969,3 +969,148 @@ test("publishBill keeps the unpublished dedup in the bill and the trend", async 
     upstreamQueue.setLimits(previous);
   }
 });
+
+async function seedCutoffChannels(
+  dbRun: (sql: string, params?: unknown[]) => Promise<void>,
+  adminId: string,
+  now: number,
+  days: string[],
+) {
+  await dbRun(
+    `INSERT INTO gateways (id, name, base_url, token_cipher, admin_user_id, demo, created_at, updated_at, disabled)
+     VALUES ('cut-on', 'on', 'https://cutoff.example', '', '1', 0, ?, ?, 0),
+            ('cut-off', 'off', 'https://cutoff.example/v1', '', '1', 0, ?, ?, 1)`,
+    [now, now, now, now],
+  );
+  const channels: [string, string, number, number][] = [
+    ["cut-keep", "cut-on", 10, 100],
+    ["cut-copy", "cut-off", 10, 40],
+    ["cut-only", "cut-off", 11, 70],
+  ];
+  for (const [id, gatewayId, upstream] of channels) {
+    await dbRun(
+      `INSERT INTO channels (
+        id, gateway_id, upstream_id, creator_user_id, name, type, group_name, status, created_at, updated_at, created_here
+      ) VALUES (?, ?, ?, ?, ?, 41, 'vertex', 1, ?, ?, 1)`,
+      [id, gatewayId, upstream, adminId, id, now, now],
+    );
+  }
+  for (const day of days) {
+    for (const [id, , , amount] of channels) {
+      await dbRun(
+        `INSERT INTO billing_rows (id, bill_day, channel_id, start_day, end_day, span_days, kind, consumption)
+         VALUES (?, ?, ?, ?, ?, 1, 'amount', ?)`,
+        [`${day}:${id}`, day, id, day, day, amount],
+      );
+    }
+  }
+}
+
+test("a published null run on 2026-11-10 is stamped dedup on the first read", async () => {
+  const { dbAll, dbGet, dbRun } = await freshDb();
+  const { authenticate } = await import("./users.ts");
+  const { billingView } = await import("./billing-service.ts");
+  const admin = await authenticate("admin", "admin-pass-123");
+  if (typeof admin !== "object") throw new Error("admin");
+  const now = Date.now();
+  await seedCutoffChannels(dbRun, admin.id, now, ["2026-11-10"]);
+  await dbRun(
+    `INSERT INTO billing_runs (baseline_day, bill_day, status, started_at, published_at)
+     VALUES ('2026-11-11', '2026-11-10', 'published', ?, ?)`,
+    [now, now],
+  );
+
+  const [first, second] = await Promise.all([
+    billingView(admin, { day: "2026-11-10" }),
+    billingView(admin, { day: "2026-11-10" }),
+  ]);
+  for (const bill of [first, second]) {
+    assert.equal(bill.aggregation, "dedup");
+    assert.deepEqual(bill.rows.map((row) => row.id), ["cut-keep"]);
+    assert.equal(bill.totalConsumption, 100);
+    assert.equal(bill.disabledGateway.channels, 1);
+    assert.equal(bill.disabledGateway.consumption, 70);
+    assert.equal(trendTotal(bill, "2026-11-10"), 100);
+  }
+  assert.equal(String((await dbGet("SELECT aggregation FROM billing_runs WHERE bill_day = '2026-11-10'"))?.aggregation), "dedup");
+  const membership = await dbAll("SELECT channel_id, role FROM billing_membership WHERE bill_day = '2026-11-10' ORDER BY channel_id");
+  assert.deepEqual(
+    membership.map((row) => [String(row.channel_id), String(row.role)]),
+    [
+      ["cut-copy", "duplicate"],
+      ["cut-keep", "counted"],
+      ["cut-only", "excluded"],
+    ],
+  );
+
+  await dbRun("UPDATE gateways SET disabled = 1 WHERE id = 'cut-on'");
+  await dbRun("UPDATE gateways SET disabled = 0 WHERE id = 'cut-off'");
+  const again = await billingView(admin, { day: "2026-11-10" });
+  assert.deepEqual(again.rows.map((row) => row.id), first.rows.map((row) => row.id));
+  assert.equal(again.totalConsumption, first.totalConsumption);
+  assert.equal(again.disabledGateway.consumption, first.disabledGateway.consumption);
+  assert.equal(again.disabledGateway.channels, first.disabledGateway.channels);
+  assert.equal(trendTotal(again, "2026-11-10"), trendTotal(first, "2026-11-10"));
+  const membershipAgain = await dbAll("SELECT channel_id, role FROM billing_membership WHERE bill_day = '2026-11-10' ORDER BY channel_id");
+  assert.deepEqual(membershipAgain, membership);
+});
+
+test("a published null run on 2026-11-09 stays legacy and unstamped", async () => {
+  const { dbGet, dbRun } = await freshDb();
+  const { authenticate } = await import("./users.ts");
+  const { billingView } = await import("./billing-service.ts");
+  const admin = await authenticate("admin", "admin-pass-123");
+  if (typeof admin !== "object") throw new Error("admin");
+  const now = Date.now();
+  await seedCutoffChannels(dbRun, admin.id, now, ["2026-11-09"]);
+  await dbRun(
+    `INSERT INTO billing_runs (baseline_day, bill_day, status, started_at, published_at)
+     VALUES ('2026-11-10', '2026-11-09', 'published', ?, ?)`,
+    [now, now],
+  );
+  const first = await billingView(admin, { day: "2026-11-09" });
+  const second = await billingView(admin);
+  assert.equal(first.aggregation, "legacy");
+  assert.equal(second.aggregation, "legacy");
+  assert.equal(first.totalConsumption, 210);
+  assert.equal(first.disabledGateway.channels, 0);
+  assert.deepEqual(first.rows.map((row) => row.id).sort(), ["cut-copy", "cut-keep", "cut-only"]);
+  assert.equal(trendTotal(first, "2026-11-09"), 210);
+  assert.equal(trendTotal(second, "2026-11-09"), 210);
+  assert.equal((await dbGet("SELECT aggregation FROM billing_runs WHERE bill_day = '2026-11-09'"))?.aggregation ?? null, null);
+  assert.equal(Number((await dbGet("SELECT COUNT(*) AS n FROM billing_membership WHERE bill_day = '2026-11-09'"))?.n), 0);
+});
+
+test("the trend stamps 2026-11-10 and leaves 2026-11-09 on the stored rows", async () => {
+  const { dbGet, dbRun } = await freshDb();
+  const { authenticate } = await import("./users.ts");
+  const { billingView } = await import("./billing-service.ts");
+  const admin = await authenticate("admin", "admin-pass-123");
+  if (typeof admin !== "object") throw new Error("admin");
+  const now = Date.now();
+  await seedCutoffChannels(dbRun, admin.id, now, ["2026-11-09", "2026-11-10"]);
+  await dbRun(
+    `INSERT INTO billing_runs (baseline_day, bill_day, status, started_at, published_at)
+     VALUES ('2026-11-10', '2026-11-09', 'published', ?, ?),
+            ('2026-11-11', '2026-11-10', 'published', ?, ?)`,
+    [now, now, now, now],
+  );
+  const opened = await billingView(admin, { day: "2026-11-09" });
+  assert.equal(opened.aggregation, "legacy");
+  assert.equal(opened.totalConsumption, 210);
+  assert.equal(trendTotal(opened, "2026-11-09"), 210);
+  assert.equal(trendTotal(opened, "2026-11-10"), 100);
+  assert.equal((await dbGet("SELECT aggregation FROM billing_runs WHERE bill_day = '2026-11-09'"))?.aggregation ?? null, null);
+  assert.equal(String((await dbGet("SELECT aggregation FROM billing_runs WHERE bill_day = '2026-11-10'"))?.aggregation), "dedup");
+
+  await dbRun("UPDATE gateways SET disabled = 1 WHERE id = 'cut-on'");
+  await dbRun("UPDATE gateways SET disabled = 0 WHERE id = 'cut-off'");
+  const again = await billingView(admin);
+  assert.equal(again.billDay, "2026-11-10");
+  assert.equal(again.aggregation, "dedup");
+  assert.equal(again.totalConsumption, 100);
+  assert.equal(again.disabledGateway.consumption, 70);
+  assert.equal(trendTotal(again, "2026-11-09"), 210);
+  assert.equal(trendTotal(again, "2026-11-10"), 100);
+  assert.equal((await dbGet("SELECT aggregation FROM billing_runs WHERE bill_day = '2026-11-09'"))?.aggregation ?? null, null);
+});

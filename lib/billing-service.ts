@@ -3,7 +3,7 @@ import { rollupReadingValues, type ReadingSummary } from "./billing-query";
 import { CALLS_PER_CHANNEL, LIST_SYNC_RESERVE_PER_MIN, type PlanChannel } from "./billing-plan";
 import { channelTypeName } from "./channel-types";
 import { QUOTA_PER_DOLLAR } from "./format";
-import { dbAll, dbGet, dbRun } from "./db";
+import { dbAll, dbGet, dbRun, dbTransaction } from "./db";
 import { getGateway } from "./gateways";
 import { syncReconChannel } from "./recon-service";
 import { rebindMarkers } from "./rebind";
@@ -11,6 +11,7 @@ import { rateLimits } from "./settings";
 import { addDays, formatShanghaiTime, logWindow, shanghaiClock, shanghaiMidnight } from "./shanghai";
 import { scopeOwnerId } from "./scope";
 import type { SessionUser } from "./types";
+import { isPostgresUrl } from "./paths";
 import { normalizeBaseUrl } from "./url";
 import { gatewayApi } from "./gateway-adapter";
 import { judgeListPage } from "./list-sweep";
@@ -495,8 +496,14 @@ export function rollupReadings(rows: Row[]): ReadingSummary {
 type BillAggregateMode = "legacy" | "live" | "frozen";
 
 /**
+ * First bill_day on the dedup rules. A published run on or after this day whose
+ * aggregation is still null is stamped on the first read. 2026-11-09 and earlier stay as stored.
+ */
+export const DEDUP_RULE_START = "2026-11-10";
+
+/**
  * One decision for the open bill and for every day in the trend.
- * Unpublished runs are live. A published null version is the stored rows.
+ * Unpublished runs are live. A published null version before DEDUP_RULE_START is the stored rows.
  * 'dedup' is the frozen new rules. Any later version stays on the stored rows until it has a branch.
  */
 function billAggregateMode(run: { status?: unknown; aggregation?: unknown } | null | undefined): BillAggregateMode {
@@ -662,6 +669,49 @@ async function loadMergedRows(billDay: string, scope: string, scopeParams: unkno
   };
 }
 
+/**
+ * Published runs on or after DEDUP_RULE_START that were stored with a null rule version
+ * get one live dedup pass, then the same freeze publishBill writes. Earlier null runs are left alone.
+ * The stamp and the membership insert commit together. A second caller sees the stamp and does not write again.
+ */
+async function adoptNullDedupRuns(): Promise<void> {
+  const pending = await dbAll(
+    `SELECT DISTINCT bill_day FROM billing_runs
+     WHERE status = 'published' AND aggregation IS NULL AND bill_day >= ?`,
+    [DEDUP_RULE_START],
+  );
+  for (const row of pending) await adoptNullDedupDay(String(row.bill_day));
+}
+
+async function adoptNullDedupDay(billDay: string): Promise<void> {
+  if (billDay < DEDUP_RULE_START) return;
+  const lock = isPostgresUrl() ? " FOR UPDATE" : "";
+  await dbTransaction(async (tx) => {
+    const open = await tx.all(
+      `SELECT baseline_day FROM billing_runs
+       WHERE bill_day = ? AND status = 'published' AND aggregation IS NULL AND bill_day >= ?${lock}`,
+      [billDay, DEDUP_RULE_START],
+    );
+    if (!open.length) return;
+    const roles = partitionRoles((await loadMergedRows(billDay, "", [])).merged);
+    await tx.run("DELETE FROM billing_membership WHERE bill_day = ?", [billDay]);
+    for (const [channelId, role] of roles) {
+      await tx.run(
+        `INSERT INTO billing_membership (bill_day, channel_id, role) VALUES (?, ?, ?)
+         ON CONFLICT(bill_day, channel_id) DO NOTHING`,
+        [billDay, channelId, role],
+      );
+    }
+    const stamped = await tx.all(
+      `UPDATE billing_runs SET aggregation = 'dedup'
+       WHERE bill_day = ? AND status = 'published' AND aggregation IS NULL AND bill_day >= ?
+       RETURNING baseline_day`,
+      [billDay, DEDUP_RULE_START],
+    );
+    if (!stamped.length) throw new Error("dedup stamp lost");
+  });
+}
+
 /** Freeze the unscoped dedup decision for a bill that is being published for the first time. */
 async function freezeBillMembership(billDay: string): Promise<void> {
   const roles = partitionRoles((await loadMergedRows(billDay, "", [])).merged);
@@ -757,6 +807,7 @@ async function supplierBillRows(channels: Row[], billDay: string): Promise<Row[]
 
 export async function billingView(actor: SessionUser, options: BillingViewOptions = {}) {
   const unsyncedOnly = options.unsyncedOnly === true;
+  await adoptNullDedupRuns();
   const clock = shanghaiClock();
   const live = await dbGet("SELECT * FROM billing_runs WHERE baseline_day = ?", [clock.day]);
   const requested = options.day?.trim() || "";
