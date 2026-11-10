@@ -10,16 +10,67 @@ export function billingRequestQuery(input: { day?: string | null; unsynced?: boo
   return qs ? `?${qs}` : "";
 }
 
-/** Disabled-gateway figure. No readings stay missing (never $0). A partial set keeps the sum and is marked incomplete. */
-export function disabledGatewayAmountText(
-  summary: { channels: number; consumption: number | null; complete: boolean } | null | undefined,
+/** A real reading is kind=amount with a finite consumption, including 0. Missing and unsynced rows are not 0. */
+export type ReadingSummary = {
+  channels: number;
+  readings: number;
+  consumption: number | null;
+  complete: boolean;
+};
+
+export function rollupReadingValues(rows: { kind?: string | null; consumption?: number | null }[]): ReadingSummary {
+  let readings = 0;
+  let sum = 0;
+  for (const row of rows) {
+    if (String(row.kind ?? "") !== "amount") continue;
+    if (row.consumption === null || row.consumption === undefined) continue;
+    const value = Number(row.consumption);
+    if (!Number.isFinite(value)) continue;
+    readings += 1;
+    sum += value;
+  }
+  return {
+    channels: rows.length,
+    readings,
+    consumption: readings > 0 ? sum : null,
+    complete: rows.length > 0 && readings === rows.length,
+  };
+}
+
+/**
+ * No real readings → missing. Every channel has a reading → the amount.
+ * A partial set keeps the sum and says how many channels were read, e.g. `$0.00 · 不完整（4/635 有读数）`.
+ */
+export function readingAmountText(
+  summary: { channels: number; readings?: number; consumption: number | null; complete: boolean } | null | undefined,
   money: (value: number) => string,
   missing: string,
-  incomplete: string,
+  incomplete: string | ((readings: number, channels: number) => string),
 ): string {
-  if (!summary?.channels || summary.consumption === null) return missing;
-  if (!summary.complete) return `${money(summary.consumption)} · ${incomplete}`;
-  return money(summary.consumption);
+  if (!summary || summary.channels <= 0 || summary.consumption === null || summary.consumption === undefined) return missing;
+  if (summary.complete) return money(summary.consumption);
+  const note = typeof incomplete === "function" ? incomplete(summary.readings ?? 0, summary.channels) : incomplete;
+  return `${money(summary.consumption)} · ${note}`;
+}
+
+/** Group subtotal and the grey disabled-gateway row share one readings format. */
+export function groupSubtotalText(
+  rows: { kind?: string | null; consumption?: number | null }[],
+  money: (value: number) => string,
+  missing: string,
+  incomplete: (readings: number, channels: number) => string,
+): string {
+  return readingAmountText(rollupReadingValues(rows), money, missing, incomplete);
+}
+
+/** Disabled-gateway figure. No readings stay missing (never $0). A partial set keeps the sum and names n/total. */
+export function disabledGatewayAmountText(
+  summary: { channels: number; readings?: number; consumption: number | null; complete: boolean } | null | undefined,
+  money: (value: number) => string,
+  missing: string,
+  incomplete: string | ((readings: number, channels: number) => string),
+): string {
+  return readingAmountText(summary, money, missing, incomplete);
 }
 
 /** Date input value. A hand-picked day wins. Otherwise show the bill actually loaded, never today's date. */

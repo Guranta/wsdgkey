@@ -167,7 +167,14 @@ const SCHEMA = [
     published_at INTEGER,
     total_count INTEGER NOT NULL DEFAULT 0,
     ok_count INTEGER NOT NULL DEFAULT 0,
-    failed_count INTEGER NOT NULL DEFAULT 0
+    failed_count INTEGER NOT NULL DEFAULT 0,
+    aggregation TEXT
+  )`,
+  `CREATE TABLE IF NOT EXISTS billing_membership (
+    bill_day TEXT NOT NULL,
+    channel_id TEXT NOT NULL,
+    role TEXT NOT NULL,
+    PRIMARY KEY (bill_day, channel_id)
   )`,
   `CREATE TABLE IF NOT EXISTS billing_attempts (
     baseline_day TEXT NOT NULL,
@@ -546,6 +553,8 @@ export async function ensureReady(): Promise<void> {
         ["missing_confirmed_at", "INTEGER"],
       ]);
       await addMissingColumns(db, "billing_rows", [["billing_mode", "TEXT NOT NULL DEFAULT ''"]]);
+      // null = published before dedup (render the stored rows). 'dedup' = frozen by publishBill.
+      await addMissingColumns(db, "billing_runs", [["aggregation", "TEXT"]]);
       await db.exec(
         `INSERT INTO channel_bindings (id, record_id, gateway_id, newapi_channel_id, bound_at, reason, bind_snapshot)
          SELECT 'seed-' || id, id, gateway_id, upstream_id, created_at, 'seed', COALESCE(create_baseline, used_quota)
