@@ -45,6 +45,7 @@
 
 ## 关联文档
 
+- 供应商子账户是另一份需求，相关但分开，不并入本文：`docs/plans/2026-11-10-supplier-subaccounts.md`
 - `docs/plans/2026-11-08-jwt-channels-diff.md` — 设计差异说明（权威 UI 规格）
 - `docs/plans/2026-11-08-jwt-channels-acceptance.md` — 测试必过增量（AUTH-S-09… / CH-S-11…）
 - 冒烟基线缺陷（补丁前）：jwt 网关曾显示「已停用」「缺少令牌」——实现后 AUTH-S-09…12 必须清掉
