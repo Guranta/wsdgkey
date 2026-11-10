@@ -2,6 +2,7 @@
 
 import { useConnections } from "@/components/providers";
 import { BRAND_NAME } from "@/lib/brand";
+import { gatewayCardCopy, settingsIntroKey } from "@/lib/gateway-card";
 import { suggestSellerGatewayName } from "@/lib/seller-name";
 import { formatShanghaiTime } from "@/lib/shanghai";
 import { Alert, buttonClass, Card, fieldClass, PageHeader, useIsClient } from "@/components/ui";
@@ -40,6 +41,7 @@ export function SettingsView() {
   const errors = useTranslations("errors");
   const locale = useLocale();
   const [gateways, setGateways] = useState<Gateway[]>([]);
+  const [gatewaysLoaded, setGatewaysLoaded] = useState(false);
   const [limits, setLimits] = useState<Limits>(EMPTY);
   const [saved, setSaved] = useState<Limits>(EMPTY);
   const [form, setForm] = useState<Draft>(BLANK);
@@ -56,6 +58,7 @@ export function SettingsView() {
     const limitRes = admin ? await fetch("/api/settings", { cache: "no-store" }) : null;
     const gatewayRes = await fetch("/api/gateways", { cache: "no-store" });
     if (gatewayRes.ok) setGateways((await gatewayRes.json()) as Gateway[]);
+    setGatewaysLoaded(true);
     if (limitRes?.ok) {
       const body = (await limitRes.json()) as Limits;
       setLimits(body);
@@ -135,7 +138,7 @@ export function SettingsView() {
     setForm(BLANK);
     setProbe(null);
     setAdding(false);
-    setNotice(seller ? t("sellerSaved") : t("savedGateway"));
+    setNotice(seller ? t("sellerSaved") : supplier ? t("supplierSaved") : t("savedGateway"));
     await load();
     await reload();
   }
@@ -192,10 +195,12 @@ export function SettingsView() {
 
   if (!hydrated || !ready) return <p className="text-sm text-muted">{t("loading")}</p>;
   const knownError = (value: string) => ((errors as unknown as { has: (key: string) => boolean }).has(value) ? errors(value as "sellerAuthFailed") : value);
+  const introKey = settingsIntroKey({ admin, kinds: gateways.map((item) => item.kind), draftingPassword: adding && accountKind });
+  const toneClass = { muted: "bg-input text-muted", ok: "bg-ok-soft text-ok", warn: "bg-warn-soft text-warn", danger: "bg-danger-soft text-danger" };
 
   return (
     <div className="mx-auto max-w-[640px] pb-24">
-      <PageHeader title={t("title")} description={admin ? t("description") : t("supplierHint")} />
+      <PageHeader title={t("title")} description={!admin || gatewaysLoaded ? t(introKey) : undefined} />
       {alerts.map((item) => (
         <div key={item.id} className="mb-4 rounded-control bg-warn-soft px-4 py-3 text-sm leading-5 break-words text-warn">
           {t("renewalBanner", {
@@ -238,6 +243,19 @@ export function SettingsView() {
           {gateways.length === 0 ? <li className="text-sm text-muted">{t("noGateways")}</li> : gateways.map((item) => {
             const isSeller = item.kind === "newapi_seller";
             const failed = isSeller && item.authStatus === "failed";
+            const copy = gatewayCardCopy(item);
+            const credential = copy.subtitle === "account"
+              ? t("accountLabel", { name: item.username || "—" })
+              : copy.subtitle === "token"
+                ? item.tokenMasked
+                : copy.subtitle === "demo"
+                  ? common("demo")
+                  : copy.subtitle === "connected"
+                    ? t("connected")
+                    : copy.subtitle === "needRelogin"
+                      ? t("needRelogin")
+                      : t("tokenMissing");
+            const pill = copy.pill === "deactivated" ? t("deactivated") : copy.pill === "connected" ? t("connected") : copy.pill === "needRelogin" ? t("needRelogin") : copy.pill === "connectionError" ? t("connectionError") : t("tokenInvalid");
             return (
               <li key={item.id} className="rounded-[14px] border border-line px-3 py-3">
                 <div className="flex items-start justify-between gap-3">
@@ -253,13 +271,13 @@ export function SettingsView() {
                     </div>
                     <div className="mt-1 break-all text-xs text-muted">{item.baseUrl}</div>
                     <div className="mt-1 break-words text-xs text-muted">
-                      {isSeller ? t("accountLabel", { name: item.username || "—" }) : item.tokenMasked || (item.demo ? common("demo") : t("tokenMissing"))}
+                      {credential}
                       {" · "}
                       {t("channelCount", { count: item.channelCount ?? 0 })}
                     </div>
                   </div>
-                  <span title={item.kind === "newapi_supplier" && (failed || !item.tokenSet) ? t("supplierReloginTip") : undefined} className={`whitespace-nowrap rounded-full px-2 py-0.5 text-xs ${item.disabled ? "bg-input text-muted" : failed ? "bg-warn-soft text-warn" : item.tokenSet || item.demo ? "bg-ok-soft text-ok" : "bg-danger-soft text-danger"}`}>
-                    {item.disabled ? t("deactivated") : item.kind === "newapi_supplier" && (failed || !item.tokenSet) ? t("needRelogin") : failed ? t("connectionError") : item.tokenSet || item.demo ? t("connected") : t("tokenInvalid")}
+                  <span title={copy.reloginTip ? t("supplierReloginTip") : undefined} className={`whitespace-nowrap rounded-full px-2 py-0.5 text-xs ${toneClass[copy.tone]}`}>
+                    {pill}
                   </span>
                 </div>
                 <div className="mt-2 flex flex-wrap gap-2">
