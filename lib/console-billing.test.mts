@@ -4,7 +4,7 @@ import http from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { billingPickerDay, billingRequestQuery } from "./billing-query.ts";
+import { billingPickerDay, billingRequestQuery, disabledGatewayAmountText } from "./billing-query.ts";
 
 const dir = mkdtempSync(path.join(tmpdir(), "newapi-console-billing-"));
 process.env.DATABASE_URL = `file:${path.join(dir, "app.db")}`;
@@ -23,6 +23,11 @@ test("a picked bill day is sent, and the picker shows the loaded day", () => {
   assert.notEqual(billingPickerDay(null, { billDay: "2026-11-08", requestedDay: null }), "2026-11-10");
   assert.equal(billingPickerDay("2026-11-01", { billDay: "2026-11-08", requestedDay: null }), "2026-11-01");
   assert.equal(billingPickerDay(null, { billDay: null, requestedDay: "2026-11-09" }), "2026-11-09");
+  const money = (value: number) => `$${value}`;
+  assert.equal(disabledGatewayAmountText({ channels: 2, consumption: null, complete: false }, money, "缺数据", "不完整"), "缺数据");
+  assert.equal(disabledGatewayAmountText({ channels: 2, consumption: 40, complete: false }, money, "缺数据", "不完整"), "$40 · 不完整");
+  assert.equal(disabledGatewayAmountText({ channels: 2, consumption: 30, complete: true }, money, "缺数据", "不完整"), "$30");
+  assert.notEqual(disabledGatewayAmountText({ channels: 1, consumption: null, complete: false }, () => "$0.00", "缺数据", "不完整"), "$0.00");
 });
 
 async function freshDb() {
@@ -31,7 +36,7 @@ async function freshDb() {
   resetSecretKeyForTests();
   resetDatabaseForTests();
   await ensureReady();
-  for (const table of ["billing_rows", "billing_runs", "billing_attempts", "channels", "gateways"]) {
+  for (const table of ["billing_rows", "billing_runs", "billing_attempts", "channel_bindings", "channels", "gateways"]) {
     await dbRun(`DELETE FROM ${table}`);
   }
   return { dbGet, dbRun, dbAll };
@@ -200,6 +205,7 @@ test("disabled gateways are left out of totals and the same upstream id is count
   assert.equal(bill.totalConsumption, 205);
   assert.equal(bill.disabledGateway.consumption, 70);
   assert.equal(bill.disabledGateway.channels, 1);
+  assert.equal(bill.disabledGateway.complete, true);
   assert.equal(bill.usedUsd, 1);
   assert.deepEqual(
     bill.rows.map((row) => row.id).sort(),
@@ -212,6 +218,72 @@ test("disabled gateways are left out of totals and the same upstream id is count
   assert.equal(bill.bySupplier.reduce((sum, item) => sum + item.value, 0), 205);
   assert.equal(bill.byGroup.reduce((sum, item) => sum + item.value, 0), 205);
   assert.equal(bill.byType.reduce((sum, item) => sum + item.value, 0), 205);
+});
+
+test("a disabled gateway row is missing, incomplete, or a full amount", async () => {
+  const { dbRun } = await freshDb();
+  const { authenticate } = await import("./users.ts");
+  const { billingView } = await import("./billing-service.ts");
+  const admin = await authenticate("admin", "admin-pass-123");
+  if (typeof admin !== "object") throw new Error("admin");
+  const now = Date.now();
+  await dbRun(
+    `INSERT INTO gateways (id, name, base_url, token_cipher, admin_user_id, demo, created_at, updated_at, disabled)
+     VALUES ('gw-off', 'off', 'https://paused.example', '', '1', 0, ?, ?, 1)`,
+    [now, now],
+  );
+  const channel = async (id: string, upstream: number) => {
+    await dbRun(
+      `INSERT INTO channels (id, gateway_id, upstream_id, creator_user_id, name, type, group_name, status, created_at, updated_at, created_here)
+       VALUES (?, 'gw-off', ?, ?, ?, 1, 'pool', 1, ?, ?, 1)`,
+      [id, upstream, admin.id, id, now, now],
+    );
+  };
+  for (const [id, upstream] of [
+    ["none-a", 1],
+    ["none-b", 2],
+    ["part-a", 3],
+    ["part-b", 4],
+    ["all-a", 5],
+    ["all-b", 6],
+  ] as const) {
+    await channel(id, upstream);
+  }
+  await dbRun(
+    `INSERT INTO billing_rows (id, bill_day, channel_id, start_day, end_day, span_days, kind, consumption)
+     VALUES ('n1', '2026-11-05', 'none-a', '2026-11-05', '2026-11-05', 1, 'unsynced', NULL),
+            ('n2', '2026-11-05', 'none-b', '2026-11-05', '2026-11-05', 1, 'unsynced', NULL),
+            ('p1', '2026-11-06', 'part-a', '2026-11-06', '2026-11-06', 1, 'amount', 40),
+            ('p2', '2026-11-06', 'part-b', '2026-11-06', '2026-11-06', 1, 'unsynced', NULL),
+            ('a1', '2026-11-07', 'all-a', '2026-11-07', '2026-11-07', 1, 'amount', 10),
+            ('a2', '2026-11-07', 'all-b', '2026-11-07', '2026-11-07', 1, 'amount', 20)`,
+  );
+  await dbRun(
+    `INSERT INTO billing_runs (baseline_day, bill_day, status, started_at, published_at)
+     VALUES ('2026-11-06', '2026-11-05', 'published', ?, ?),
+            ('2026-11-07', '2026-11-06', 'published', ?, ?),
+            ('2026-11-08', '2026-11-07', 'published', ?, ?)`,
+    [now, now, now, now, now, now],
+  );
+
+  const none = await billingView(admin, { day: "2026-11-05" });
+  assert.equal(none.disabledGateway.channels, 2);
+  assert.equal(none.disabledGateway.consumption, null);
+  assert.equal(none.disabledGateway.complete, false);
+  assert.equal(none.totalConsumption, 0);
+  assert.equal(disabledGatewayAmountText(none.disabledGateway, () => "$0.00", "缺数据", "不完整"), "缺数据");
+
+  const partial = await billingView(admin, { day: "2026-11-06" });
+  assert.equal(partial.disabledGateway.channels, 2);
+  assert.equal(partial.disabledGateway.consumption, 40);
+  assert.equal(partial.disabledGateway.complete, false);
+  assert.equal(disabledGatewayAmountText(partial.disabledGateway, (value) => String(value), "缺数据", "不完整"), "40 · 不完整");
+
+  const all = await billingView(admin, { day: "2026-11-07" });
+  assert.equal(all.disabledGateway.channels, 2);
+  assert.equal(all.disabledGateway.consumption, 30);
+  assert.equal(all.disabledGateway.complete, true);
+  assert.equal(disabledGatewayAmountText(all.disabledGateway, (value) => String(value), "缺数据", "不完整"), "30");
 });
 
 test("确认于 is written only when a complete list sweep confirms the channel is absent", async () => {

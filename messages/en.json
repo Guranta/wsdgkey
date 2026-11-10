@@ -533,7 +533,7 @@
     "latestPublished": "Latest published: {day}",
     "unpublishedLine": "{day} · not published / still pulling",
     "unpublishedHint": "The {day} bill is not published yet. It can be read after 06:00.",
-    "disabledGatewayExcluded": "Disabled gateways · not in the total",
+    "disabledGatewayExcluded": "Disabled gateways (not in totals)",
     "allSuppliers": "All suppliers",
     "supplierFilter": "Supplier",
     "staleTag": "Stale",

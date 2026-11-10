@@ -3,7 +3,7 @@
 import { KpiRing, QueueStrip, deltaText, type QueueSnap } from "@/components/channels-view";
 import { useConnections } from "@/components/providers";
 import { Alert, Card, PageHeader, useIsClient } from "@/components/ui";
-import { billingPickerDay, billingRequestQuery } from "@/lib/billing-query";
+import { billingPickerDay, billingRequestQuery, disabledGatewayAmountText } from "@/lib/billing-query";
 import { formatUsd } from "@/lib/format";
 import { useLocale, useTranslations } from "next-intl";
 import { useEffect, useState } from "react";
@@ -60,7 +60,7 @@ type Bill = {
   billDay: string | null;
   unsyncedCount: number;
   incomplete?: boolean;
-  disabledGateway?: { channels: number; consumption: number };
+  disabledGateway?: { channels: number; consumption: number | null; complete: boolean };
   totalConsumption: number;
   totalTestQuota: number;
   showTestLine?: boolean;
@@ -166,7 +166,7 @@ export function DisabledGatewayLine({ bill }: { bill: Bill }) {
   return (
     <p className="text-sm text-muted">
       {t("disabledGatewayExcluded")}
-      <span className="ml-2 tabular-nums">{formatUsd(bill.disabledGateway.consumption, locale)}</span>
+      <span className="ml-2 tabular-nums">{disabledGatewayAmountText(bill.disabledGateway, (value) => formatUsd(value, locale), t("missingData"), t("incomplete"))}</span>
     </p>
   );
 }

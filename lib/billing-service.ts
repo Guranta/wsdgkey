@@ -432,12 +432,12 @@ function gatewaySite(base: unknown): string {
   return normalized.ok ? normalized.siteBase : raw;
 }
 
-/** One upstream channel (same id, same site) counts once. An enabled gateway wins over a disabled copy. */
+/** One upstream channel counts once. The key is the normalized upstream site plus the upstream channel id. An enabled gateway wins over a disabled copy. */
 function partitionBillRows(rows: Row[]): { counted: Row[]; excluded: Row[] } {
   const groups = new Map<string, Row[]>();
   for (const row of rows) {
     const upstream = Number(row.upstream_id);
-    const key = Number.isFinite(upstream) ? `${upstream}|${gatewaySite(row.gateway_base)}` : `row:${String(row.channel_id)}`;
+    const key = Number.isFinite(upstream) ? `${gatewaySite(row.gateway_base)}|${upstream}` : `row:${String(row.channel_id)}`;
     const list = groups.get(key) ?? [];
     list.push(row);
     groups.set(key, list);
@@ -460,6 +460,16 @@ function consumptionOf(row: Row): number | null {
   if (row.consumption === null || row.consumption === undefined) return null;
   const value = Number(row.consumption);
   return Number.isFinite(value) ? value : null;
+}
+
+/** Same three states as a group total: no readings, a partial sum, or a complete sum. A missing reading stays null and is never turned into 0. */
+export function rollupReadings(rows: Row[]): { channels: number; consumption: number | null; complete: boolean } {
+  const present = rows.map(consumptionOf).filter((value): value is number => value !== null);
+  return {
+    channels: rows.length,
+    consumption: present.length ? present.reduce((sum, value) => sum + value, 0) : null,
+    complete: rows.length > 0 && present.length === rows.length,
+  };
 }
 
 function trendFrom(rows: Row[]): { day: string; label: string; spanDays: number; value: number; span: boolean }[] {
@@ -647,10 +657,7 @@ export async function billingView(actor: SessionUser, options: BillingViewOption
   const markers = billDay ? await rebindMarkers(visible.map((row) => String(row.channel_id)), billDay) : new Map();
   const counted = preferred.filter((row) => consumptionOf(row) !== null);
   const unsynced = preferred.filter((row) => row.kind !== "amount");
-  const disabledGateway = {
-    channels: excluded.length,
-    consumption: excluded.reduce((sum, row) => sum + (consumptionOf(row) ?? 0), 0),
-  };
+  const disabledGateway = rollupReadings(excluded);
   const by = (key: string) => {
     const map = new Map<string, number>();
     for (const row of counted) {

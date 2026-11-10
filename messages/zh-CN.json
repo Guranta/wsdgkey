@@ -533,7 +533,7 @@
     "latestPublished": "最近已发布：{day}",
     "unpublishedLine": "{day} · 未发布 / 拉取中",
     "unpublishedHint": "{day} 账单尚未发布，06:00 后可看",
-    "disabledGatewayExcluded": "已停用网关 · 不计入合计",
+    "disabledGatewayExcluded": "已停用网关（不计入合计）",
     "allSuppliers": "全部供应商",
     "supplierFilter": "供应商",
     "staleTag": "过期",

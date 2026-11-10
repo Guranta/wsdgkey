@@ -3,6 +3,7 @@
 import { BillDayControl, BillPeriod, billFindingText, billLabelText, useBillingBill, type BillRow } from "@/components/billing-view";
 import { useConnections } from "@/components/providers";
 import { Alert, buttonClass, Card, PageHeader } from "@/components/ui";
+import { disabledGatewayAmountText } from "@/lib/billing-query";
 import { channelTypeOption } from "@/lib/channel-types";
 import { formatUsd } from "@/lib/format";
 import { formatShanghaiTime } from "@/lib/shanghai";
@@ -161,7 +162,7 @@ export function BillsView() {
               {bill.disabledGateway?.channels ? (
                 <tr className="border-t border-line text-muted">
                   <td className="px-4 py-3">{t("disabledGatewayExcluded")}</td>
-                  <td className="whitespace-nowrap px-4 py-3 tabular-nums">{money(bill.disabledGateway.consumption)}</td>
+                  <td className="whitespace-nowrap px-4 py-3 tabular-nums">{disabledGatewayAmountText(bill.disabledGateway, money, t("missingData"), t("incomplete"))}</td>
                   <td className="px-4 py-3">—</td>
                   <td className="px-4 py-3">—</td>
                 </tr>

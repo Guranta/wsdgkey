@@ -10,6 +10,18 @@ export function billingRequestQuery(input: { day?: string | null; unsynced?: boo
   return qs ? `?${qs}` : "";
 }
 
+/** Disabled-gateway figure. No readings stay missing (never $0). A partial set keeps the sum and is marked incomplete. */
+export function disabledGatewayAmountText(
+  summary: { channels: number; consumption: number | null; complete: boolean } | null | undefined,
+  money: (value: number) => string,
+  missing: string,
+  incomplete: string,
+): string {
+  if (!summary?.channels || summary.consumption === null) return missing;
+  if (!summary.complete) return `${money(summary.consumption)} · ${incomplete}`;
+  return money(summary.consumption);
+}
+
 /** Date input value. A hand-picked day wins. Otherwise show the bill actually loaded, never today's date. */
 export function billingPickerDay(
   picked: string | null,
