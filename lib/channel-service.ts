@@ -12,6 +12,7 @@ import {
 import { dbAll, dbGet, dbRun } from "./db";
 import { gatewayApi } from "./gateway-adapter";
 import { gatewayVisibleTo, getGateway, type GatewaySecret } from "./gateways";
+import { judgeListPage } from "./list-sweep";
 import { atChannelCap, isBaseUrlDenial, sellerCreateBodies } from "./seller-payload";
 import { snapshotCreateBaseline } from "./billing-service";
 import { ensureBinding } from "./rebind";
@@ -84,6 +85,7 @@ export type ChannelView = {
   autoDisabledAt: number | null;
   createdHere: boolean;
   upstreamMissing: boolean;
+  gatewayDisabled: boolean;
   origin: "created" | "imported";
 };
 
@@ -162,6 +164,7 @@ function view(row: ChannelRow, baseline: number | null): ChannelView {
     autoDisabledAt: row.auto_disabled_at ? Number(row.auto_disabled_at) : timeFromHistory(history),
     createdHere: Number(row.created_here) === 1,
     upstreamMissing: Number(row.upstream_missing) === 1,
+    gatewayDisabled: Number(row.gateway_disabled) === 1,
     origin: String(row.origin ?? "created") === "imported" ? "imported" : "created",
   };
 }
@@ -207,23 +210,26 @@ function statusClause(status: string): string {
   if (status === "manual") return "c.status = 2 AND c.upstream_missing = 0";
   if (status === "auto") return "c.status = 3 AND c.upstream_missing = 0";
   if (status === "disabled") return "c.status <> 1";
-  if (status === "missing") return "c.upstream_missing = 1 AND c.missing_handled = 0";
-  if (status === "anomaly") return "(c.status = 3 OR c.upstream_missing = 1 OR c.sync_status NOT IN ('ok', 'pending'))";
+  if (status === "missing") return "c.upstream_missing = 1 AND c.missing_handled = 0 AND COALESCE(g.disabled, 0) = 0";
+  if (status === "anomaly") return "COALESCE(g.disabled, 0) = 0 AND (c.status = 3 OR c.upstream_missing = 1 OR c.sync_status NOT IN ('ok', 'pending'))";
   return "";
 }
 
 async function loadStats(scopeWhere: string, scopeParams: unknown[], day: string) {
   const days = Array.from({ length: 7 }, (_, index) => addDays(day, index - 6));
   const rows = (await dbAll(
-    `SELECT c.created_at, c.status, c.upstream_missing, c.used_quota, c.today_quota, b.baseline AS today_baseline
+    `SELECT c.created_at, c.status, c.upstream_missing, c.used_quota, c.today_quota, b.baseline AS today_baseline,
+            COALESCE(g.disabled, 0) AS gateway_disabled
      FROM channels c
      LEFT JOIN channel_baselines b ON b.channel_id = c.id AND b.day = ?
+     LEFT JOIN gateways g ON g.id = c.gateway_id
      WHERE ${scopeWhere}`,
     [day, ...scopeParams],
   )) as ChannelRow[];
   const bounds = days.map((item) => shanghaiMidnight(addDays(item, 1)));
   const createdBefore = (end: number, match: (row: ChannelRow) => boolean) =>
     rows.reduce((count, row) => (Number(row.created_at ?? 0) < end && match(row) ? count + 1 : count), 0);
+  const liveGateway = (row: ChannelRow) => Number(row.gateway_disabled) !== 1;
   const enabledRow = (row: ChannelRow) => Number(row.status) === 1 && Number(row.upstream_missing) !== 1;
   const disabledRow = (row: ChannelRow) => Number(row.status) !== 1;
   const todayOf = (row: ChannelRow) => {
@@ -249,15 +255,18 @@ async function loadStats(scopeWhere: string, scopeParams: unknown[], day: string
   );
   const pull = (await dbGet(
     `SELECT
-       COALESCE(SUM(CASE WHEN c.sync_status = 'ok' AND c.upstream_missing = 0 THEN 1 ELSE 0 END), 0) AS ok_n,
-       COALESCE(SUM(CASE WHEN c.sync_status = 'pending' THEN 1 ELSE 0 END), 0) AS queued_n,
-       COALESCE(SUM(CASE WHEN c.next_poll_at > ? AND c.consecutive_failures >= 2 THEN 1 ELSE 0 END), 0) AS backoff_n,
-       COALESCE(SUM(CASE WHEN c.consecutive_failures >= 3 AND c.sync_status NOT IN ('ok', 'pending') THEN 1 ELSE 0 END), 0) AS throttled_n,
-       COALESCE(SUM(CASE WHEN c.sync_status NOT IN ('ok', 'pending', 'missing') THEN 1 ELSE 0 END), 0) AS failed_n,
-       COALESCE(SUM(CASE WHEN c.sync_status IN ('missing', 'unsynced') OR c.upstream_missing = 1 THEN 1 ELSE 0 END), 0) AS unsynced_n,
-       COALESCE(SUM(CASE WHEN c.status = 3 AND c.upstream_missing = 0 THEN 1 ELSE 0 END), 0) AS auto_n,
-       COALESCE(SUM(CASE WHEN c.upstream_missing = 1 OR c.sync_status NOT IN ('ok', 'pending') THEN 1 ELSE 0 END), 0) AS pull_n
-     FROM channels c WHERE ${scopeWhere}`,
+       COALESCE(SUM(CASE WHEN COALESCE(g.disabled, 0) = 0 AND c.sync_status = 'ok' AND c.upstream_missing = 0 THEN 1 ELSE 0 END), 0) AS ok_n,
+       COALESCE(SUM(CASE WHEN COALESCE(g.disabled, 0) = 0 AND c.sync_status = 'pending' THEN 1 ELSE 0 END), 0) AS queued_n,
+       COALESCE(SUM(CASE WHEN COALESCE(g.disabled, 0) = 0 AND c.next_poll_at > ? AND c.consecutive_failures >= 2 THEN 1 ELSE 0 END), 0) AS backoff_n,
+       COALESCE(SUM(CASE WHEN COALESCE(g.disabled, 0) = 0 AND c.consecutive_failures >= 3 AND c.sync_status NOT IN ('ok', 'pending') THEN 1 ELSE 0 END), 0) AS throttled_n,
+       COALESCE(SUM(CASE WHEN COALESCE(g.disabled, 0) = 0 AND c.sync_status NOT IN ('ok', 'pending', 'missing') THEN 1 ELSE 0 END), 0) AS failed_n,
+       COALESCE(SUM(CASE WHEN COALESCE(g.disabled, 0) = 0 AND (c.sync_status IN ('missing', 'unsynced') OR c.upstream_missing = 1) THEN 1 ELSE 0 END), 0) AS unsynced_n,
+       COALESCE(SUM(CASE WHEN COALESCE(g.disabled, 0) = 0 AND c.status = 3 AND c.upstream_missing = 0 THEN 1 ELSE 0 END), 0) AS auto_n,
+       COALESCE(SUM(CASE WHEN COALESCE(g.disabled, 0) = 0 AND (c.upstream_missing = 1 OR c.sync_status NOT IN ('ok', 'pending')) THEN 1 ELSE 0 END), 0) AS pull_n,
+       COALESCE(SUM(CASE WHEN COALESCE(g.disabled, 0) = 1 THEN 1 ELSE 0 END), 0) AS paused_n
+     FROM channels c
+     LEFT JOIN gateways g ON g.id = c.gateway_id
+     WHERE ${scopeWhere}`,
     [Date.now(), ...scopeParams],
   )) as ChannelRow | undefined;
   const queue = upstreamQueue.snapshot();
@@ -266,9 +275,10 @@ async function loadStats(scopeWhere: string, scopeParams: unknown[], day: string
     enabled: rows.reduce((count, row) => count + (enabledRow(row) ? 1 : 0), 0),
     disabled: rows.reduce((count, row) => count + (disabledRow(row) ? 1 : 0), 0),
     running: rows.reduce((count, row) => count + (enabledRow(row) ? 1 : 0), 0),
-    anomaly: rows.reduce((count, row) => count + (Number(row.status) === 3 || Number(row.upstream_missing) === 1 ? 1 : 0), 0),
+    anomaly: rows.reduce((count, row) => count + (liveGateway(row) && (Number(row.status) === 3 || Number(row.upstream_missing) === 1) ? 1 : 0), 0),
     autoDisabled: Number(pull?.auto_n ?? 0),
     pullFailed: Number(pull?.pull_n ?? 0),
+    pausedGateways: Number(pull?.paused_n ?? 0),
     todayQuota,
     yesterdayQuota: Number(yesterdayRow?.n ?? 0),
     queue: {
@@ -341,19 +351,24 @@ export async function queryChannels(actor: SessionUser, search: URLSearchParams)
             COALESCE(SUM(CASE WHEN c.status = 2 AND c.upstream_missing = 0 THEN 1 ELSE 0 END), 0) AS manual_n,
             COALESCE(SUM(CASE WHEN c.status = 3 AND c.upstream_missing = 0 THEN 1 ELSE 0 END), 0) AS auto_n,
             COALESCE(SUM(CASE WHEN c.status <> 1 THEN 1 ELSE 0 END), 0) AS disabled_n,
-            COALESCE(SUM(CASE WHEN c.status = 3 OR c.upstream_missing = 1 OR c.sync_status NOT IN ('ok', 'pending') THEN 1 ELSE 0 END), 0) AS anomaly_n
-     FROM channels c WHERE ${filtered}`,
+            COALESCE(SUM(CASE WHEN COALESCE(g.disabled, 0) = 0 AND (c.status = 3 OR c.upstream_missing = 1 OR c.sync_status NOT IN ('ok', 'pending')) THEN 1 ELSE 0 END), 0) AS anomaly_n
+     FROM channels c
+     LEFT JOIN gateways g ON g.id = c.gateway_id
+     WHERE ${filtered}`,
     params,
   )) as ChannelRow | undefined;
   const clause = statusClause(status);
   if (clause) where.push(clause);
   const sqlWhere = where.join(" AND ");
-  const totalRow = clause ? await dbGet(`SELECT COUNT(*) AS n FROM channels c WHERE ${sqlWhere}`, params) : counted;
+  const totalRow = clause
+    ? await dbGet(`SELECT COUNT(*) AS n FROM channels c LEFT JOIN gateways g ON g.id = c.gateway_id WHERE ${sqlWhere}`, params)
+    : counted;
   const rows = (await dbAll(
-    `SELECT c.*, u.name AS creator_name, b.baseline AS today_baseline
+    `SELECT c.*, u.name AS creator_name, b.baseline AS today_baseline, COALESCE(g.disabled, 0) AS gateway_disabled
      FROM channels c
      LEFT JOIN users u ON u.id = c.creator_user_id
      LEFT JOIN channel_baselines b ON b.channel_id = c.id AND b.day = ?
+     LEFT JOIN gateways g ON g.id = c.gateway_id
      WHERE ${sqlWhere}
      ${order.sql}
      LIMIT ? OFFSET ?`,
@@ -518,9 +533,12 @@ async function createSellerChannels(actor: SessionUser, gateway: GatewaySecret, 
     throw httpError(detail || "createFailed", 400, undefined, failures.some((item) => isBaseUrlDenial(item.reason)) ? "base_url" : undefined);
   }
   let claimed = 0;
-  for (let page = 1; page <= 20; page += 1) {
+  let agreed: number | null = null;
+  const seen = new Set<number>();
+  for (let page = 1; page <= 2000; page += 1) {
     const listed = await api.list(page);
     for (const item of listed.items) {
+      seen.add(item.id);
       if (before.has(item.id) || item.name !== form.name) continue;
       const id = await rememberChannel(gateway.id, item, owner, "");
       if (id) {
@@ -533,7 +551,10 @@ async function createSellerChannels(actor: SessionUser, gateway: GatewaySecret, 
       claimed += 1;
       before.add(item.id);
     }
-    if (claimed >= created || page * 20 >= listed.total) break;
+    if (claimed >= created) break;
+    const step = judgeListPage({ explicitTotal: listed.total, agreedTotal: agreed, itemCount: listed.items.length, uniqueIds: seen.size });
+    agreed = step.agreedTotal;
+    if (step.verdict !== "continue") break;
   }
   await audit(actor, createdIds[0] ?? null, null, "create", "ok", `created ${created}`);
   const tests = [];
@@ -565,9 +586,13 @@ export async function createChannels(actor: SessionUser, body: Record<string, un
   }
   const createdIds: string[] = [];
   let claimed = 0;
-  for (let page = 1; page <= 5; page += 1) {
+  let agreed: number | null = null;
+  const seen = new Set<number>();
+  const expected = Math.max(1, form.multi_key_mode === "multi_to_single" ? 1 : keys.length);
+  for (let page = 1; page <= 2000; page += 1) {
     const listed = await listUpstreamChannels(gateway, page);
     for (const item of listed.items) {
+      seen.add(item.id);
       if (before.has(item.id) || item.name !== form.name) continue;
       const creator = scopeOwnerId(actor);
       const id = await rememberChannel(gateway.id, item, creator, fingerprint(keys[claimed] ?? keys[0] ?? ""));
@@ -580,7 +605,10 @@ export async function createChannels(actor: SessionUser, body: Record<string, un
       }
       claimed += 1;
     }
-    if (claimed >= Math.max(1, form.multi_key_mode === "multi_to_single" ? 1 : keys.length) || page * 20 >= listed.total) break;
+    if (claimed >= expected) break;
+    const step = judgeListPage({ explicitTotal: listed.total, agreedTotal: agreed, itemCount: listed.items.length, uniqueIds: seen.size });
+    agreed = step.agreedTotal;
+    if (step.verdict !== "continue") break;
   }
   await audit(actor, createdIds[0] ?? null, null, "create", "ok", `created ${claimed}`);
   const tests = [];
@@ -913,11 +941,52 @@ export async function matchingFingerprints(gatewayId: string, keys: string[]): P
   return duplicateFingerprints(gatewayId, keys);
 }
 
-export async function syncGatewayPage(gatewayId: string, page: number): Promise<{ done: boolean }> {
+const sweepTotals = new Map<string, number>();
+
+export function resetListSweepForTests(): void {
+  sweepTotals.clear();
+}
+
+function safeSyncError(message: string): string {
+  return message.replace(/bearer\s+\S+/gi, "bearer [redacted]").replace(/[\r\n]/g, " ").slice(0, 200);
+}
+
+/** Fetch failure only. Channel status and upstream_missing stay as they were; seen rows were already refreshed. */
+async function noteListFailure(gatewayId: string, message: string): Promise<void> {
+  const safe = safeSyncError(message || "syncFailed");
+  const now = Date.now();
+  await dbRun(
+    "UPDATE gateways SET list_sync_status = 'failed', list_sync_error = ?, list_sync_at = ?, updated_at = ? WHERE id = ?",
+    [safe, now, now, gatewayId],
+  );
+  await dbRun(
+    `UPDATE channels SET sync_status = ?, sync_error = ?, consecutive_failures = consecutive_failures + 1, next_poll_at = ?
+     WHERE gateway_id = ? AND created_here = 1
+       AND upstream_id NOT IN (SELECT upstream_id FROM gateway_list_seen WHERE gateway_id = ?)`,
+    [/繁忙|限流|超时/.test(safe) ? "rate_limited" : "failed", safe, now + pollDelayMs(2), gatewayId, gatewayId],
+  );
+}
+
+async function noteListOk(gatewayId: string): Promise<void> {
+  const now = Date.now();
+  await dbRun(
+    "UPDATE gateways SET list_sync_status = 'ok', list_sync_error = '', list_sync_at = ?, updated_at = ? WHERE id = ?",
+    [now, now, gatewayId],
+  );
+}
+
+export async function syncGatewayPage(gatewayId: string, page: number): Promise<{ done: boolean; aborted: boolean }> {
   const gateway = await getGateway(gatewayId);
-  if (!gateway) return { done: true };
+  if (!gateway || gateway.disabled) return { done: true, aborted: true };
+  if (page > 1 && !sweepTotals.has(gatewayId)) {
+    await noteListFailure(gatewayId, "incompleteList");
+    return { done: true, aborted: true };
+  }
   try {
-    if (page <= 1) await dbRun("DELETE FROM gateway_list_seen WHERE gateway_id = ?", [gatewayId]);
+    if (page <= 1) {
+      await dbRun("DELETE FROM gateway_list_seen WHERE gateway_id = ?", [gatewayId]);
+      sweepTotals.delete(gatewayId);
+    }
     const listed = await gatewayApi(gateway).list(page);
     for (const item of listed.items) {
       await rememberChannel(gateway.id, item, null);
@@ -926,18 +995,28 @@ export async function syncGatewayPage(gatewayId: string, page: number): Promise<
         [gatewayId, item.id],
       );
     }
-    const done = page * 20 >= listed.total;
-    if (done) await finishGatewayList(gatewayId);
-    return { done };
+    const uniqueRow = await dbGet("SELECT COUNT(*) AS n FROM gateway_list_seen WHERE gateway_id = ?", [gatewayId]);
+    const step = judgeListPage({
+      explicitTotal: listed.total,
+      agreedTotal: sweepTotals.get(gatewayId) ?? null,
+      itemCount: listed.items.length,
+      uniqueIds: Number(uniqueRow?.n ?? 0),
+    });
+    if (step.agreedTotal !== null) sweepTotals.set(gatewayId, step.agreedTotal);
+    if (step.verdict === "continue") return { done: false, aborted: false };
+    sweepTotals.delete(gatewayId);
+    if (step.verdict === "complete") {
+      await finishGatewayList(gatewayId);
+      await noteListOk(gatewayId);
+      return { done: true, aborted: false };
+    }
+    await noteListFailure(gatewayId, "incompleteList");
+    return { done: true, aborted: true };
   } catch (error) {
     const message = error instanceof Error ? error.message : "syncFailed";
-    const rateLimited = /繁忙|限流|超时/.test(message);
-    await dbRun(
-      `UPDATE channels SET sync_status = ?, sync_error = ?, consecutive_failures = consecutive_failures + 1, next_poll_at = ?, last_sync_at = ?
-       WHERE gateway_id = ?`,
-      [rateLimited ? "rate_limited" : "failed", message, Date.now() + pollDelayMs(2), Date.now(), gatewayId],
-    );
-    return { done: true };
+    sweepTotals.delete(gatewayId);
+    await noteListFailure(gatewayId, message);
+    return { done: true, aborted: true };
   }
 }
 
@@ -970,14 +1049,23 @@ export async function importSellerChannels(actor: SessionUser, gatewayId: string
   let failed = 0;
   let keptAutoDisabled = 0;
   const failures: { id: number; name: string; reason: string }[] = [];
-  let total = 0;
   let manageable = 0;
   let visibleOnly = 0;
-  // 按 total 翻页，不设 50 页业务上限（供应商站 625+ 还会涨）；2000 页仅作熔断
+  let incomplete = false;
+  let agreed: number | null = null;
+  const seen = new Set<number>();
+  // 按核对过的 total 翻页，不设 50 页业务上限（供应商站 625+ 还会涨）；2000 页仅作熔断
   for (let page = 1; page <= 2000; page += 1) {
-    const listed = await api.list(page);
-    total = listed.total;
+    let listed;
+    try {
+      listed = await api.list(page);
+    } catch (cause) {
+      incomplete = true;
+      failures.push({ id: 0, name: "", reason: cause instanceof Error ? cause.message : "incompleteList" });
+      break;
+    }
     for (const item of listed.items) {
+      seen.add(item.id);
       const existing = await dbGet("SELECT id, created_here FROM channels WHERE gateway_id = ? AND upstream_id = ?", [gateway.id, item.id]);
       if (existing && Number(existing.created_here) === 1) {
         skipped += 1;
@@ -1000,9 +1088,20 @@ export async function importSellerChannels(actor: SessionUser, gatewayId: string
         failures.push({ id: item.id, name: item.name, reason: cause instanceof Error ? cause.message : "importFailed" });
       }
     }
-    if (page * 20 >= total) break;
+    const step = judgeListPage({ explicitTotal: listed.total, agreedTotal: agreed, itemCount: listed.items.length, uniqueIds: seen.size });
+    agreed = step.agreedTotal;
+    if (step.verdict === "complete") break;
+    if (step.verdict === "abort") {
+      incomplete = true;
+      failures.push({ id: 0, name: "", reason: "incompleteList" });
+      break;
+    }
   }
-  return { imported, skipped, failed, failures, keptAutoDisabled, manageable, visibleOnly };
+  if (!incomplete && (agreed === null || seen.size !== agreed)) {
+    incomplete = true;
+    failures.push({ id: 0, name: "", reason: "incompleteList" });
+  }
+  return { imported, skipped, failed, failures, keptAutoDisabled, manageable, visibleOnly, incomplete };
 }
 
 export async function readSellerCap(actor: SessionUser, gatewayId: string) {

@@ -156,6 +156,7 @@
     "missingToday": "Today's usage is missing, so a midnight baseline cannot be formed",
     "pullFailed": "The pull failed",
     "syncFailed": "Sync failed",
+    "incompleteList": "The channel list did not finish, so the short page was not treated as the end",
     "demoGatewayLocked": "The demo gateway cannot be turned into a real address",
     "periodLocked": "This month is locked. Only adjustment records can be added.",
     "reconMissing": "That reconciliation row was not found",
@@ -237,6 +238,9 @@
     "emptyContact": "Ask an admin to add a gateway in Settings › Gateways",
     "addDisabledTip": "An admin has not configured a gateway yet, so channels cannot be added",
     "missingUpstream": "Not found on the gateway",
+    "statusNotUpdated": "Status not updated",
+    "gatewayPaused": "Disabled gateway · not syncing",
+    "importIncomplete": "The list did not finish, so the import stopped. A short page was not treated as the end, and unseen channels were not marked missing.",
     "notTested": "Not tested yet",
     "testOk": "OK {ms}ms",
     "testFail": "Failed {message}",
@@ -281,6 +285,7 @@
       "anomaly": "Anomaly",
       "share": "{percent}%",
       "anomalyHint": "Auto-disabled {auto} · pull failed {pull}",
+      "pausedGateways": "Disabled gateway · not syncing {count}",
       "yesterday": "Yesterday {amount} · {delta}"
     },
     "tabs": {
@@ -473,6 +478,7 @@
     "snapshotTag": "Snapshot billing",
     "snapshotTip": "Supplier-account gateway: daily usage is the difference of used_quota snapshots at 00:00.",
     "missingData": "Missing data",
+    "incomplete": "Incomplete",
     "importedTag": "Imported",
     "grandTotal": "Total",
     "subtotal": "Subtotal",
@@ -702,6 +708,7 @@
     "supplierTlsNote": "If the site serves HTTPS with an IP + self-signed certificate, the deployer must set a per-host TLS exception (tls_exception_host) or the connection will fail.",
     "supplierSaveTests": "Saving performs a real login once to verify the credentials.",
     "needRelogin": "Re-login needed",
+    "fetchFailedAt": "Pull failed · {when}",
     "supplierReloginTip": "Session expired; re-enter the account password under Settings › Gateways and test the connection",
     "subAccountHint": "You can change your own password. Channels and bills match the parent account. Gateways cannot be managed."
   },

@@ -3,14 +3,14 @@ import { planBillingTick } from "./billing-plan";
 import { gatewayIds, syncGatewayPage } from "./channel-service";
 import { ensureDemoGateway } from "./demo-gateway";
 import { dbGet } from "./db";
+import { beginSweepTick, finishSweepTick, type SweepBook } from "./list-sweep";
 import { upstreamQueue } from "./rate-queue";
 import { rateLimits } from "./settings";
 import { formatShanghaiMidnight, nextShanghaiMidnight, shanghaiClock } from "./shanghai";
 import { runSupplierSnapshots } from "./supplier-billing";
 
 const pulling = new Set<string>();
-const pages = new Map<string, number>();
-let lastListSync = 0;
+let sweep: SweepBook = { lastListSync: 0, pages: new Map() };
 let started = false;
 
 async function tick(): Promise<void> {
@@ -46,16 +46,11 @@ async function tick(): Promise<void> {
   }
   await runSupplierSnapshots();
   const interval = Math.max(30_000, Number(process.env.SYNC_INTERVAL_MS ?? 300_000) || 300_000);
-  const now = Date.now();
-  if (now - lastListSync >= interval) {
-    lastListSync = now;
-    for (const id of await gatewayIds()) pages.set(id, 1);
-  }
-  for (const [gatewayId, page] of pages) {
-    const result = await syncGatewayPage(gatewayId, page);
-    if (result.done) pages.delete(gatewayId);
-    else pages.set(gatewayId, page + 1);
-    break;
+  const planned = beginSweepTick(sweep, Date.now(), interval, await gatewayIds());
+  sweep = planned.book;
+  if (planned.next) {
+    const result = await syncGatewayPage(planned.next.id, planned.next.page);
+    sweep = finishSweepTick(sweep, planned.next.id, result.done);
   }
 }
 

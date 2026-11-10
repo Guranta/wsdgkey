@@ -3,6 +3,7 @@ import { gatewayApi } from "./gateway-adapter";
 import type { GatewaySecret } from "./gateways";
 import { getGateway } from "./gateways";
 import { readCustomerBilling, type MidnightReading } from "./billing-math";
+import { walkListedPages } from "./list-sweep";
 import { shanghaiClock, shanghaiMidnight } from "./shanghai";
 
 /** 计费源 C：供应商 JWT 站按「一次列表走完」拍每日 0 点快照（docs/plans/2026-11-05-billing-pluggable.md §6）。
@@ -53,11 +54,39 @@ async function upsertSnapshot(channelId: string, day: string, reading: MidnightR
   );
 }
 
+async function clearGatewayDone(gatewayId: string, day: string): Promise<void> {
+  await dbRun("DELETE FROM billing_snapshots WHERE channel_id = ? AND day = ? AND source_id = ? AND note = 'gateway-done'", [
+    `__gw__:${gatewayId}`,
+    day,
+    SOURCE_ID,
+  ]);
+}
+
+async function markGatewayDone(gatewayId: string, day: string, now: number): Promise<void> {
+  await dbRun(
+    `INSERT INTO billing_snapshots (channel_id, day, source_id, quality, amount, unit, pulled_at, note)
+     VALUES (?, ?, ?, 'ok', NULL, 'usd', ?, 'gateway-done')
+     ON CONFLICT(channel_id, day, source_id) DO NOTHING`,
+    [`__gw__:${gatewayId}`, day, SOURCE_ID, now],
+  );
+}
+
+function scheduleRetry(state: Attempt, now: number, message: string): void {
+  if (state.fastLeft > 0) {
+    state.fastLeft -= 1;
+    state.nextAt = now + 30_000;
+  } else {
+    state.nextAt = now + ROUND_MS;
+  }
+  if (/繁忙|限流|超时/.test(message) && state.fastLeft <= 0) state.nextAt = now + ROUND_MS;
+}
+
 export async function runSupplierSnapshots(now = Date.now()): Promise<void> {
   const { supplierBillingEnabled } = await import("./settings");
   if (!(await supplierBillingEnabled())) return;
-  const clock = shanghaiClock(new Date(now));
-  const day = clock.day;
+  const today = shanghaiClock().day;
+  const day = shanghaiClock(new Date(now)).day;
+  if (day !== today) return;
   const rows = (await dbAll("SELECT id FROM gateways WHERE disabled = 0 AND kind = 'newapi_supplier'")) as { id: string }[];
   for (const row of rows) {
     const key = attemptKey(row.id, day);
@@ -71,29 +100,29 @@ export async function runSupplierSnapshots(now = Date.now()): Promise<void> {
     const gateway = await getGateway(row.id);
     if (!gateway) continue;
     try {
-      await snapshotGateway(gateway, day, now);
-      await dbRun(
-        `INSERT INTO billing_snapshots (channel_id, day, source_id, quality, amount, unit, pulled_at, note)
-         VALUES (?, ?, ?, 'ok', NULL, 'usd', ?, 'gateway-done')
-         ON CONFLICT(channel_id, day, source_id) DO NOTHING`,
-        [`__gw__:${row.id}`, day, SOURCE_ID, now],
-      );
+      const outcome = await snapshotGateway(gateway, day, now);
+      if (outcome !== "complete") {
+        await clearGatewayDone(row.id, day);
+        state.done = false;
+        scheduleRetry(state, now, "incompleteList");
+        console.info(`[supplier-billing] ${day} ${row.id} incompleteList (fast left ${state.fastLeft})`);
+        continue;
+      }
+      await markGatewayDone(row.id, day, now);
       state.done = true;
     } catch (error) {
-      if (state.fastLeft > 0) {
-        state.fastLeft -= 1;
-        state.nextAt = now + 30_000;
-      } else {
-        state.nextAt = now + ROUND_MS;
-      }
+      await clearGatewayDone(row.id, day);
+      state.done = false;
       const message = error instanceof Error ? error.message : "snapshotFailed";
+      scheduleRetry(state, now, message);
       console.info(`[supplier-billing] ${day} ${row.id} ${message} (fast left ${state.fastLeft})`);
-      if (/繁忙|限流|超时/.test(message) && state.fastLeft <= 0) state.nextAt = now + ROUND_MS;
     }
   }
 }
 
-async function snapshotGateway(gateway: GatewaySecret, day: string, now: number): Promise<void> {
+async function snapshotGateway(gateway: GatewaySecret, day: string, now: number): Promise<"complete" | "abort"> {
+  const today = shanghaiClock().day;
+  if (day !== today || day !== shanghaiClock(new Date(now)).day) return "abort";
   const dayStart = shanghaiMidnight(day);
   const late = now - dayStart > WINDOW_MS;
   const imported = (await dbAll(
@@ -102,9 +131,8 @@ async function snapshotGateway(gateway: GatewaySecret, day: string, now: number)
   )) as { id: string; upstream_id: number; imported_at: number | null }[];
   const byUpstream = new Map(imported.map((channel) => [Number(channel.upstream_id), channel]));
   const api = gatewayApi(gateway);
-  for (let page = 1; page <= 2000; page += 1) {
-    const listed = await api.list(page);
-    for (const item of listed.items) {
+  return walkListedPages((page) => api.list(page), async (items) => {
+    for (const item of items) {
       const channel = byUpstream.get(item.id);
       if (!channel) continue;
       const prior = await dbGet("SELECT 1 AS ok FROM billing_snapshots WHERE channel_id = ? AND day < ? AND source_id = ?", [
@@ -112,18 +140,81 @@ async function snapshotGateway(gateway: GatewaySecret, day: string, now: number)
         day,
         SOURCE_ID,
       ]);
+      const already = await dbGet("SELECT 1 AS ok FROM billing_snapshots WHERE channel_id = ? AND day = ? AND source_id = ?", [
+        channel.id,
+        day,
+        SOURCE_ID,
+      ]);
       const reading = readCustomerBilling(item.customerBilling ?? null, now);
-      const notes = [
-        prior ? null : "import-anchor",
-        late && reading.quality === "ok" ? "late" : null,
-      ].filter(Boolean);
+      const notes = [prior ? null : "import-anchor", late && reading.quality === "ok" ? "late" : null].filter(Boolean);
       await upsertSnapshot(channel.id, day, reading, item.customerBilling ?? {}, notes.length ? notes.join("+") : null);
-      if (late && reading.quality === "ok" && notes.includes("late")) {
+      if (!already && late && reading.quality === "ok" && notes.includes("late")) {
         console.warn(`[supplier-billing] late snapshot ${day} channel ${channel.id} — 快照晚于日界窗口`);
       }
     }
-    if (page * 20 >= listed.total) break;
+  });
+}
+
+export type SupplierRefill = {
+  day: string;
+  enabled: boolean;
+  gateways: { id: string; outcome: "complete" | "abort"; filled: number }[];
+};
+
+/** Admin hook: fill today's missing supplier snapshots only. Existing rows stay. Past days are not written. */
+export async function refillSupplierSnapshots(now = Date.now()): Promise<SupplierRefill> {
+  const { supplierBillingEnabled } = await import("./settings");
+  const today = shanghaiClock().day;
+  const enabled = await supplierBillingEnabled();
+  if (!enabled) return { day: today, enabled: false, gateways: [] };
+  const day = shanghaiClock(new Date(now)).day;
+  if (day !== today) return { day: today, enabled: true, gateways: [] };
+  const rows = (await dbAll("SELECT id FROM gateways WHERE disabled = 0 AND kind = 'newapi_supplier'")) as { id: string }[];
+  const gateways: SupplierRefill["gateways"] = [];
+  for (const row of rows) {
+    const gateway = await getGateway(row.id);
+    if (!gateway) continue;
+    const before = Number(
+      (
+        await dbGet(
+          `SELECT COUNT(*) AS n FROM billing_snapshots s
+           JOIN channels c ON c.id = s.channel_id
+           WHERE c.gateway_id = ? AND s.day = ? AND s.source_id = ?`,
+          [row.id, day, SOURCE_ID],
+        )
+      )?.n ?? 0,
+    );
+    let outcome: "complete" | "abort" = "abort";
+    try {
+      outcome = await snapshotGateway(gateway, day, now);
+    } catch (error) {
+      outcome = "abort";
+      const message = error instanceof Error ? error.message : "snapshotFailed";
+      console.info(`[supplier-billing] refill ${day} ${row.id} ${message}`);
+    }
+    const state = attempts.get(attemptKey(row.id, day)) ?? { fastLeft: FAST_RETRIES, nextAt: 0, done: false };
+    if (outcome === "complete") {
+      await markGatewayDone(row.id, day, now);
+      state.done = true;
+    } else {
+      await clearGatewayDone(row.id, day);
+      state.done = false;
+      state.nextAt = now;
+    }
+    attempts.set(attemptKey(row.id, day), state);
+    const after = Number(
+      (
+        await dbGet(
+          `SELECT COUNT(*) AS n FROM billing_snapshots s
+           JOIN channels c ON c.id = s.channel_id
+           WHERE c.gateway_id = ? AND s.day = ? AND s.source_id = ?`,
+          [row.id, day, SOURCE_ID],
+        )
+      )?.n ?? 0,
+    );
+    gateways.push({ id: row.id, outcome, filled: Math.max(0, after - before) });
   }
+  return { day, enabled: true, gateways };
 }
 
 /** 供账单展示：某渠道某日的读数（含前一天），日差交给 billing-math 的 dailyDiff。 */

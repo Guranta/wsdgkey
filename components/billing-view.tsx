@@ -7,7 +7,7 @@ import { formatUsd } from "@/lib/format";
 import { useLocale, useTranslations } from "next-intl";
 import { useEffect, useState } from "react";
 
-type OverviewStats = { total: number; running: number; anomaly: number; autoDisabled: number; pullFailed: number; todayQuota: number; yesterdayQuota: number; queue: QueueSnap };
+type OverviewStats = { total: number; running: number; anomaly: number; autoDisabled: number; pullFailed: number; pausedGateways?: number; todayQuota: number; yesterdayQuota: number; queue: QueueSnap };
 
 type Slice = { name: string; value: number };
 type BillRow = {
@@ -46,6 +46,7 @@ type Bill = {
   publishedLabel: string;
   billDay: string | null;
   unsyncedCount: number;
+  incomplete?: boolean;
   totalConsumption: number;
   totalTestQuota: number;
   showTestLine?: boolean;
@@ -207,6 +208,9 @@ export function BillingView() {
 
   if (!hydrated || !bill) return <p className="text-sm text-muted">{t("loading")}</p>;
   const money = (value: number) => formatUsd(value, locale);
+  const noAmounts = Boolean(bill.incomplete) && bill.byType.length === 0;
+  const totalLabel = noAmounts ? t("missingData") : money(bill.totalConsumption);
+  const totalCaption = bill.incomplete ? t("incomplete") : t("usage");
 
   return (
     <div>
@@ -219,6 +223,7 @@ export function BillingView() {
             <KpiRing label={ct("stats.anomaly")} value={overview.anomaly.toLocaleString(locale)} ratio={overview.total ? overview.anomaly / overview.total : 0} tone="#DC2626" hint={ct("stats.anomalyHint", { auto: overview.autoDisabled, pull: overview.pullFailed })} />
             <KpiRing label={ct("stats.today")} value={formatUsd(overview.todayQuota, locale)} ratio={overview.yesterdayQuota > 0 ? Math.min(1, overview.todayQuota / overview.yesterdayQuota) : 1} tone="#FF9500" hint={ct("stats.yesterday", { amount: formatUsd(overview.yesterdayQuota, locale), delta: deltaText(overview.todayQuota, overview.yesterdayQuota) })} />
           </div>
+          {overview.pausedGateways ? <p className="mb-3 text-sm text-muted">{ct("stats.pausedGateways", { count: overview.pausedGateways })}</p> : null}
           {admin ? <div className="mb-3"><QueueStrip queue={overview.queue} admin={admin} /></div> : null}
         </>
       ) : null}
@@ -233,7 +238,7 @@ export function BillingView() {
         ) : null}
       </div>
       <div className="mb-4 grid items-stretch gap-3 xl:grid-cols-[minmax(0,1.5fr)_16rem]">
-        <Donut title={t("byType")} slices={bill.byType} size={240} stroke={28} center={money(bill.totalConsumption)} caption={t("usage")} empty={t("noData")} unknown={t("unknownSupplier")} money={money} />
+        <Donut title={t("byType")} slices={bill.byType} size={240} stroke={28} center={totalLabel} caption={totalCaption} empty={t("noData")} unknown={t("unknownSupplier")} money={money} />
         <Card className="px-4 py-4">
           <div className="text-xs text-secondary">{t("excluded")}</div>
           <div className="mt-1 text-2xl font-semibold">{bill.unsyncedCount}</div>
@@ -241,9 +246,9 @@ export function BillingView() {
         </Card>
       </div>
       <div className={`grid gap-3 ${admin ? "lg:grid-cols-3" : "lg:grid-cols-2"}`}>
-        {admin ? <Donut title={t("bySupplier")} slices={bill.bySupplier} size={168} stroke={18} center={money(bill.totalConsumption)} caption={t("usage")} empty={t("noData")} unknown={t("unknownSupplier")} money={money} /> : null}
-        <Donut title={t("byChannel")} slices={bill.byChannel} size={168} stroke={18} center={money(bill.totalConsumption)} caption={t("usage")} empty={t("noData")} unknown={t("unknownSupplier")} money={money} />
-        <Donut title={t("byGroup")} slices={bill.byGroup} size={168} stroke={18} center={money(bill.totalConsumption)} caption={t("usage")} empty={t("noData")} unknown={t("unknownSupplier")} money={money} />
+        {admin ? <Donut title={t("bySupplier")} slices={bill.bySupplier} size={168} stroke={18} center={totalLabel} caption={totalCaption} empty={t("noData")} unknown={t("unknownSupplier")} money={money} /> : null}
+        <Donut title={t("byChannel")} slices={bill.byChannel} size={168} stroke={18} center={totalLabel} caption={totalCaption} empty={t("noData")} unknown={t("unknownSupplier")} money={money} />
+        <Donut title={t("byGroup")} slices={bill.byGroup} size={168} stroke={18} center={totalLabel} caption={totalCaption} empty={t("noData")} unknown={t("unknownSupplier")} money={money} />
       </div>
     </div>
   );

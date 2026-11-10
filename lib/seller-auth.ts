@@ -333,6 +333,10 @@ export async function sellerRequest(gatewayId: string, baseUrl: string, path: st
       throw Object.assign(new Error("网关繁忙"), { status: response.status, retryable: true, retryAfter: null });
     }
     if (response.status === 401) throw Object.assign(new Error("unauthorized"), { status: 401 });
+    if (response.status === 403) {
+      const message = safeMessage(messageOf(body) || "Access denied", [token]);
+      throw Object.assign(new Error(message), { status: 403, retryable: false });
+    }
     if (!response.ok) {
       const message = safeMessage(messageOf(body) || "网关拒绝了请求", [token]);
       throw Object.assign(new Error(message), { status: response.status, retryable: false });
@@ -349,13 +353,17 @@ export async function sellerRequest(gatewayId: string, baseUrl: string, path: st
     return await send(token);
   } catch (error) {
     const status = typeof error === "object" && error && "status" in error ? Number((error as { status?: number }).status) : 0;
-    if (status !== 401) throw error;
+    if (status !== 401 && status !== 403) throw error;
     const next = await ensureSellerAccess(gatewayId, { fetcher, force: true });
     try {
       return await send(next);
     } catch (again) {
       const againStatus = typeof again === "object" && again && "status" in again ? Number((again as { status?: number }).status) : 0;
       if (againStatus === 401) throw Object.assign(new Error("sellerAuthFailed"), { status: 401 });
+      if (againStatus === 403) {
+        const message = again instanceof Error && again.message ? again.message : "sellerAuthFailed";
+        throw Object.assign(new Error(message), { status: 403 });
+      }
       throw again;
     }
   }

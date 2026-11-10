@@ -24,9 +24,11 @@ type GatewayOption = {
   authError?: string;
   authCheckedAt?: number | null;
   accessExpiresAt?: number | null;
+  listSyncStatus?: string;
+  listSyncAt?: number | null;
 };
 type SellerCap = { canWrite: boolean; canToggle: boolean; maxChannels: number; total: number };
-type ImportResult = { imported: number; skipped: number; failed: number; failures: { id: number; name: string; reason: string }[]; keptAutoDisabled: number; manageable?: number; visibleOnly?: number };
+type ImportResult = { imported: number; skipped: number; failed: number; failures: { id: number; name: string; reason: string }[]; keptAutoDisabled: number; manageable?: number; visibleOnly?: number; incomplete?: boolean };
 type Creator = { id: string; name: string; username: string };
 type ChannelItem = DrawerChannel & {
   upstreamId: number;
@@ -51,6 +53,7 @@ type ChannelItem = DrawerChannel & {
   autoDisableReason: string;
   createdHere: boolean;
   upstreamMissing: boolean;
+  gatewayDisabled?: boolean;
   origin?: "created" | "imported";
 };
 
@@ -63,6 +66,7 @@ type Stats = {
   anomaly: number;
   autoDisabled: number;
   pullFailed: number;
+  pausedGateways?: number;
   disabled: number;
   todayQuota: number;
   yesterdayQuota: number;
@@ -382,6 +386,11 @@ export function ChannelsView() {
         title={t("title")}
         description={sellerGateway && selectedGateway ? (liveCap && liveCap.maxChannels > 0 ? t("sellerSubtitle", { name: selectedGateway.name, count: liveCap.total, max: liveCap.maxChannels }) : t("sellerSubtitleOpen", { name: selectedGateway.name, count: liveCap?.total ?? selectedGateway.siteChannelTotal ?? 0 })) : user?.role === "supplier" ? t("supplierDescription") : t("description")}
       />
+      {selectedGateway && !selectedGateway.disabled && (selectedGateway.authStatus === "failed" || selectedGateway.listSyncStatus === "failed") ? (
+        <div className="mb-4 rounded-control bg-input px-4 py-3 text-sm leading-5 text-secondary">
+          {settingsT("fetchFailedAt", { when: formatTimestamp(selectedGateway.listSyncAt || selectedGateway.authCheckedAt, locale) })}
+        </div>
+      ) : null}
       {sellerGateway && selectedGateway?.authStatus === "failed" ? (
         <div className="mb-4 rounded-control bg-warn-soft px-4 py-3 text-sm leading-5 break-words text-warn">
           {settingsT("renewalBanner", {
@@ -507,8 +516,11 @@ export function ChannelsView() {
                       {mine && !keyword && !filtered ? <p className="mt-2 text-sm text-muted">{t("mineEmpty")}</p> : null}
                     </td></tr>
                   ) : items.map((item) => {
-                    const tone = item.upstreamMissing ? "warn" : item.status === "enabled" ? "ok" : item.autoDisabled ? "danger" : "manual";
-                    const statusLabel = item.upstreamMissing ? t("missingUpstream") : item.status === "enabled" ? t("running") : item.autoDisabled ? common("autoDisabled") : t("manualDisabled");
+                    const paused = Boolean(item.gatewayDisabled);
+                    const showMissing = !paused && item.upstreamMissing;
+                    const stale = !paused && !showMissing && item.syncStatus !== "ok" && item.syncStatus !== "pending";
+                    const tone = showMissing ? "warn" : item.status === "enabled" ? "ok" : item.autoDisabled ? "danger" : "manual";
+                    const statusLabel = showMissing ? t("missingUpstream") : item.status === "enabled" ? t("running") : item.autoDisabled ? common("autoDisabled") : t("manualDisabled");
                     const reasonText = item.autoDisableReason && item.autoDisableReason !== "autoDisabled" ? item.autoDisableReason : "";
                     const pill = tone === "ok" ? "bg-ok-soft text-ok" : tone === "danger" ? "bg-danger-soft text-danger" : tone === "warn" ? "bg-warn-soft text-warn" : "bg-input text-secondary";
                     const dot = tone === "ok" ? "bg-ok" : tone === "danger" ? "bg-danger" : tone === "warn" ? "bg-warn" : "bg-muted";
@@ -546,7 +558,9 @@ export function ChannelsView() {
                           {item.autoDisabled && (reasonText || item.autoDisabledAt) ? (
                             <div className="mt-1 max-w-52 truncate text-xs text-muted" title={reasonText}>{[reasonText, item.autoDisabledAt ? formatTimestamp(item.autoDisabledAt, locale) : ""].filter(Boolean).join(" · ")}</div>
                           ) : null}
-                          {item.upstreamMissing ? <div className="mt-1 text-xs text-muted">{t("missingId", { id: item.upstreamId })}</div> : null}
+                          {showMissing ? <div className="mt-1 text-xs text-muted">{t("missingId", { id: item.upstreamId })}</div> : null}
+                          {stale ? <div className="mt-1"><span className="inline-flex rounded-full bg-input px-2 py-0.5 text-xs font-medium text-muted">{t("statusNotUpdated")}</span></div> : null}
+                          {paused ? <div className="mt-1"><span className="inline-flex rounded-full bg-input px-2 py-0.5 text-xs font-medium text-muted">{t("gatewayPaused")}</span></div> : null}
                           <div className="mt-1 flex items-center gap-1.5 text-xs text-muted">
                             <span className={`h-1.5 w-1.5 rounded-full ${item.syncStatus === "ok" ? "bg-ok" : "bg-warn"}`} />
                             {item.lastSyncAt ? t("updatedAgo", { when: formatTimestamp(item.lastSyncAt, locale) }) : t("notSynced")}
@@ -676,6 +690,7 @@ export function ChannelsView() {
               <div className="min-w-0 rounded-control bg-input px-2 py-3"><div className="break-words text-xs leading-4 text-secondary">{t("skipCount", { count: importResult.skipped })}</div><div className="text-2xl font-semibold">{importResult.skipped}</div></div>
               <div className="min-w-0 rounded-control bg-danger-soft px-2 py-3"><div className="break-words text-xs leading-4 text-secondary">{t("failCount", { count: importResult.failed })}</div><div className="text-2xl font-semibold text-danger">{importResult.failed}</div></div>
             </div>
+            {importResult.incomplete ? <p className="mt-3 text-xs leading-5 text-warn">{t("importIncomplete")}</p> : null}
             {importResult.failures.length ? (
               <ul className="mt-4 max-h-40 space-y-1 overflow-auto text-xs leading-5 break-words">
                 {importResult.failures.map((item) => <li key={item.id}>{t("importFailedItem", { id: item.id, name: item.name, reason: item.reason })}</li>)}

@@ -30,6 +30,18 @@ test("a disabled JWT gateway does not fall back to a missing-token subtitle", ()
   assert.equal(copy.pill, "deactivated");
   assert.equal(copy.subtitle, "connected");
   assert.equal(copy.reloginTip, false);
+  assert.equal(copy.fetchFailed, false);
+});
+
+test("a rejected session or failed catalog pull is a fetch failure, and a disabled gateway is not", () => {
+  const rejected = gatewayCardCopy({ ...jwt, authStatus: "failed", listSyncStatus: "failed" });
+  assert.equal(rejected.fetchFailed, true);
+  const pull = gatewayCardCopy({ ...jwt, authStatus: "ok", listSyncStatus: "failed" });
+  assert.equal(pull.fetchFailed, true);
+  assert.equal(pull.pill, "connected");
+  const paused = gatewayCardCopy({ ...jwt, authStatus: "failed", listSyncStatus: "failed", disabled: true });
+  assert.equal(paused.fetchFailed, false);
+  assert.equal(paused.pill, "deactivated");
 });
 
 test("seller cards stay on the account session and do not use token wording", () => {

@@ -11,6 +11,7 @@ export type GatewayCardInput = {
   tokenSet?: boolean;
   tokenMasked?: string;
   username?: string;
+  listSyncStatus?: string;
 };
 
 export type GatewayCardCopy = {
@@ -18,6 +19,8 @@ export type GatewayCardCopy = {
   pill: "deactivated" | "connected" | "needRelogin" | "connectionError" | "tokenInvalid";
   reloginTip: boolean;
   tone: "muted" | "ok" | "warn" | "danger";
+  /** Session rejected or the catalog pull failed. Disabled gateways are not alerts. */
+  fetchFailed: boolean;
 };
 
 export function passwordSessionKind(kind?: string): boolean {
@@ -25,6 +28,11 @@ export function passwordSessionKind(kind?: string): boolean {
 }
 
 export function gatewayCardCopy(item: GatewayCardInput): GatewayCardCopy {
+  const fetchFailed = !item.disabled && (item.authStatus === "failed" || item.listSyncStatus === "failed");
+  return { ...describeGatewayCard(item), fetchFailed };
+}
+
+function describeGatewayCard(item: GatewayCardInput): Omit<GatewayCardCopy, "fetchFailed"> {
   if (item.kind === "newapi_supplier") {
     const ok = item.authStatus === "ok";
     if (item.disabled) return { subtitle: ok ? "connected" : "needRelogin", pill: "deactivated", reloginTip: false, tone: "muted" };

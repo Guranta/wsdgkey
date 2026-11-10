@@ -156,6 +156,7 @@
     "missingToday": "缺少今日用量，无法形成 0 点基线",
     "pullFailed": "拉取失败",
     "syncFailed": "同步失败",
+    "incompleteList": "渠道列表没有拉完，未把缺页当成结束",
     "demoGatewayLocked": "演示网关不能改成真实地址",
     "periodLocked": "这个月已锁定，只能追加调整记录",
     "reconMissing": "找不到这条对账",
@@ -237,6 +238,9 @@
     "emptyContact": "请联系管理员在 设置 › 网关 添加网关",
     "addDisabledTip": "管理员还没有配置网关，暂时不能添加渠道",
     "missingUpstream": "网关上找不到",
+    "statusNotUpdated": "状态未更新",
+    "gatewayPaused": "已停用网关 · 不同步",
+    "importIncomplete": "列表没有拉完，已停止。未把缺页当成结束，也没有把没看到的渠道标成不存在。",
     "notTested": "尚未测试",
     "testOk": "正常 {ms}ms",
     "testFail": "失败 {message}",
@@ -281,6 +285,7 @@
       "anomaly": "异常",
       "share": "占 {percent}%",
       "anomalyHint": "自动禁用 {auto} · 拉取失败 {pull}",
+      "pausedGateways": "已停用网关 · 不同步 {count}",
       "yesterday": "昨日 {amount} · {delta}"
     },
     "tabs": {
@@ -473,6 +478,7 @@
     "snapshotTag": "快照计费",
     "snapshotTip": "供应商账号网关：按每日 0:00 快照的 used_quota 差计费",
     "missingData": "缺数据",
+    "incomplete": "不完整",
     "importedTag": "已导入",
     "grandTotal": "合计",
     "subtotal": "小计",
@@ -702,6 +708,7 @@
     "supplierTlsNote": "该站若以 IP + 自签证书提供 HTTPS，需由部署者为该主机配置证书例外（tls_exception_host），否则连接会失败。",
     "supplierSaveTests": "保存时会用该账号实际登录一次以验证凭据。",
     "needRelogin": "需重新登录",
+    "fetchFailedAt": "拉取失败 · {when}",
     "supplierReloginTip": "会话失效，请到设置 › 网关重新填写账号密码并测试连接",
     "subAccountHint": "可以修改自己的密码。渠道和账单与主账号相同，不能管理网关。"
   },
