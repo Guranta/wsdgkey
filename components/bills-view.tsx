@@ -3,7 +3,7 @@
 import { BillDayControl, BillPeriod, billFindingText, billLabelText, readingsNote, useBillingBill, type BillRow } from "@/components/billing-view";
 import { useConnections } from "@/components/providers";
 import { Alert, buttonClass, Card, PageHeader } from "@/components/ui";
-import { groupSubtotalText, readingAmountText } from "@/lib/billing-query";
+import { grandTotalLabel, groupSubtotalText, readingAmountText } from "@/lib/billing-query";
 import { channelTypeOption } from "@/lib/channel-types";
 import { formatUsd } from "@/lib/format";
 import { formatShanghaiTime } from "@/lib/shanghai";
@@ -155,7 +155,7 @@ export function BillsView() {
                     <td className="whitespace-nowrap px-4 py-3 text-xs tabular-nums">{money(bill.totalTestQuota)}</td>
                   </tr>
                   <tr className="border-t border-line font-semibold">
-                    <td className="px-4 py-3">{t("grandTotal")}{bill.incomplete ? ` · ${t("incomplete")}` : ""}</td>
+                    <td className="px-4 py-3">{grandTotalLabel(bill.aggregation, Boolean(bill.incomplete), t("grandTotal"), t("incomplete"))}</td>
                     <td className="whitespace-nowrap px-4 py-3 tabular-nums">{groupToday(allRows)}</td>
                     <td className="whitespace-nowrap px-4 py-3 tabular-nums">{summed(allRows, "before")}</td>
                     <td className="whitespace-nowrap px-4 py-3 tabular-nums">{summed(allRows, "cumulative")}</td>

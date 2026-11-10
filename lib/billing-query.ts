@@ -63,6 +63,20 @@ export function groupSubtotalText(
   return readingAmountText(rollupReadingValues(rows), money, missing, incomplete);
 }
 
+/**
+ * Bills total-row label. New-rule days (unpublished, or aggregation dedup) stay 「合计」 / Total.
+ * The amount cell already carries 「不完整（n/m 有读数）」. Legacy published days keep the old suffix.
+ */
+export function grandTotalLabel(
+  aggregation: "legacy" | "dedup" | undefined,
+  incomplete: boolean,
+  total: string,
+  incompleteMark: string,
+): string {
+  if (aggregation === "dedup") return total;
+  return incomplete ? `${total} · ${incompleteMark}` : total;
+}
+
 /** Disabled-gateway figure. No readings stay missing (never $0). A partial set keeps the sum and names n/total. */
 export function disabledGatewayAmountText(
   summary: { channels: number; readings?: number; consumption: number | null; complete: boolean } | null | undefined,

@@ -330,11 +330,13 @@ async function writeRow(channelId: string, billDay: string, backfillAt: number |
 
 /**
  * Publish one bill day.
- * A run that is not already published is stamped `aggregation = 'dedup'` and its
- * membership (counted / excluded / duplicate) is frozen from the new rules.
- * 2026-11-10 is the first such bill: `ensureBillingRun` publishes it at 06:00
- * Shanghai. A run that was already published keeps a null aggregation, which
- * the view renders as the stored rows (no dedup, no disabled-gateway split).
+ * `billing_runs.aggregation` is the rule version, not a boolean.
+ * null means legacy: render the stored rows as they were published.
+ * 'dedup' means this generation of rules (dedup + disabled-gateway split).
+ * A later rule adds a new value instead of reusing these two.
+ * A run that is not already published is stamped 'dedup' and its membership is frozen.
+ * 2026-11-10 is the first such bill: `ensureBillingRun` publishes it at 06:00 Shanghai.
+ * A run that was already published keeps its version and is not re-partitioned.
  */
 export async function publishBill(billDay: string, baselineDay: string): Promise<void> {
   const existing = await dbGet("SELECT status FROM billing_runs WHERE baseline_day = ?", [baselineDay]);
@@ -492,6 +494,27 @@ export function rollupReadings(rows: Row[]): ReadingSummary {
 
 type BillAggregateMode = "legacy" | "live" | "frozen";
 
+/**
+ * One decision for the open bill and for every day in the trend.
+ * Unpublished runs are live. A published null version is the stored rows.
+ * 'dedup' is the frozen new rules. Any later version stays on the stored rows until it has a branch.
+ */
+function billAggregateMode(run: { status?: unknown; aggregation?: unknown } | null | undefined): BillAggregateMode {
+  if (!run || String(run.status ?? "") !== "published") return "live";
+  switch (String(run.aggregation ?? "")) {
+    case "dedup":
+      return "frozen";
+    default:
+      return "legacy";
+  }
+}
+
+function publishedRun(runs: Row[]): Row | undefined {
+  return runs
+    .filter((row) => String(row.status) === "published")
+    .sort((a, b) => Number(b.published_at ?? 0) - Number(a.published_at ?? 0))[0];
+}
+
 function partitionRoles(rows: Row[]): Map<string, "counted" | "excluded" | "duplicate"> {
   const { counted, excluded } = partitionBillRows(rows);
   const roles = new Map<string, "counted" | "excluded" | "duplicate">();
@@ -581,12 +604,7 @@ function trendFrom(
   const out: { day: string; label: string; spanDays: number; value: number; span: boolean }[] = [];
   for (const [day, list] of [...byDay.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
     const mode = modeFor(day);
-    let counted: Row[];
-    if (mode === "legacy") counted = list;
-    else {
-      const roles = mode === "frozen" ? rolesFor(day) : undefined;
-      counted = selectBillRows(list, mode === "frozen" && roles && roles.size > 0 ? "frozen" : "live", roles ?? null).preferred;
-    }
+    const counted = selectBillRows(list, mode, rolesFor(day) ?? null).preferred;
     const buckets = new Map<string, { label: string; spanDays: number; value: number }>();
     for (const row of counted) {
       const amount = mode === "legacy"
@@ -751,7 +769,7 @@ export async function billingView(actor: SessionUser, options: BillingViewOption
     showing = latest;
     publication = showing ? "latest" : "none";
     billDay = showing ? String(showing.bill_day) : null;
-    mode = showing && String(showing.aggregation ?? "") === "dedup" ? "frozen" : "legacy";
+    mode = billAggregateMode(showing);
   } else {
     const published = ((await dbAll(
       "SELECT * FROM billing_runs WHERE bill_day = ? AND status = 'published' ORDER BY published_at DESC LIMIT 1",
@@ -765,12 +783,12 @@ export async function billingView(actor: SessionUser, options: BillingViewOption
       showing = open;
       publication = "unpublished";
       billDay = open ? requested : null;
-      mode = "live";
+      mode = billAggregateMode(open);
     } else {
       showing = published;
       publication = latest && String(latest.bill_day) === requested ? "latest" : "published";
       billDay = String(published.bill_day);
-      mode = String(published.aggregation ?? "") === "dedup" ? "frozen" : "legacy";
+      mode = billAggregateMode(published);
     }
   }
   const scopedToSupplier = actor.role !== "admin" || Boolean(options.supplierId);
@@ -814,12 +832,8 @@ export async function billingView(actor: SessionUser, options: BillingViewOption
     map.set(String(row.channel_id), String(row.role));
     rolesByDay.set(day, map);
   }
-  const modeFor = (day: string): BillAggregateMode => {
-    const published = runMeta.filter((row) => String(row.bill_day) === day && String(row.status) === "published");
-    if (published.some((row) => String(row.aggregation ?? "") === "dedup")) return "frozen";
-    if (published.length) return "legacy";
-    return "live";
-  };
+  const modeFor = (day: string): BillAggregateMode =>
+    billAggregateMode(publishedRun(runMeta.filter((row) => String(row.bill_day) === day)));
   const counts = live
     ? await scopedCounts(String(live.baseline_day), actor)
     : { total: 0, ok: 0, failed: 0 };

@@ -553,7 +553,7 @@ export async function ensureReady(): Promise<void> {
         ["missing_confirmed_at", "INTEGER"],
       ]);
       await addMissingColumns(db, "billing_rows", [["billing_mode", "TEXT NOT NULL DEFAULT ''"]]);
-      // null = published before dedup (render the stored rows). 'dedup' = frozen by publishBill.
+      // Rule version. null = legacy, render stored rows. 'dedup' = new rules, frozen at publish. Later rules add a new value.
       await addMissingColumns(db, "billing_runs", [["aggregation", "TEXT"]]);
       await db.exec(
         `INSERT INTO channel_bindings (id, record_id, gateway_id, newapi_channel_id, bound_at, reason, bind_snapshot)

@@ -534,7 +534,7 @@
     "noBillDay": "{day} 还没有账单",
     "latestPublished": "最近已发布：{day}",
     "unpublishedLine": "{day} · 未发布 / 拉取中",
-    "unpublishedHint": "{day} 尚未发布。下面按去重和停用网关规则现算，06:00 发布后冻结。",
+    "unpublishedHint": "{day} 尚未发布，下面的数字还会变，06:00 发布后固定",
     "disabledGatewayExcluded": "已停用网关（不计入合计）",
     "allSuppliers": "全部供应商",
     "supplierFilter": "供应商",
