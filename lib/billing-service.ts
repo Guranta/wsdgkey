@@ -10,6 +10,7 @@ import { rateLimits } from "./settings";
 import { addDays, formatShanghaiTime, logWindow, shanghaiClock, shanghaiMidnight } from "./shanghai";
 import { scopeOwnerId } from "./scope";
 import type { SessionUser } from "./types";
+import { normalizeBaseUrl } from "./url";
 import { gatewayApi } from "./gateway-adapter";
 import { judgeListPage } from "./list-sweep";
 import { fetchUpstreamChannel, testLogQuota, todayQuota, UpstreamFailure } from "./upstream";
@@ -422,6 +423,73 @@ export type BillingViewOptions = {
   supplierId?: string | null;
 };
 
+export type BillPublication = "latest" | "published" | "unpublished" | "none";
+
+function gatewaySite(base: unknown): string {
+  const raw = String(base ?? "").trim();
+  if (!raw) return "";
+  const normalized = normalizeBaseUrl(raw);
+  return normalized.ok ? normalized.siteBase : raw;
+}
+
+/** One upstream channel (same id, same site) counts once. An enabled gateway wins over a disabled copy. */
+function partitionBillRows(rows: Row[]): { counted: Row[]; excluded: Row[] } {
+  const groups = new Map<string, Row[]>();
+  for (const row of rows) {
+    const upstream = Number(row.upstream_id);
+    const key = Number.isFinite(upstream) ? `${upstream}|${gatewaySite(row.gateway_base)}` : `row:${String(row.channel_id)}`;
+    const list = groups.get(key) ?? [];
+    list.push(row);
+    groups.set(key, list);
+  }
+  const counted: Row[] = [];
+  const excluded: Row[] = [];
+  for (const list of groups.values()) {
+    const enabled = list.filter((row) => Number(row.gateway_disabled) !== 1);
+    const pool = (enabled.length ? enabled : list).slice().sort((a, b) => String(a.channel_id).localeCompare(String(b.channel_id)));
+    const winner = pool[0];
+    if (!winner) continue;
+    if (Number(winner.gateway_disabled) === 1) excluded.push(winner);
+    else counted.push(winner);
+  }
+  return { counted, excluded };
+}
+
+function consumptionOf(row: Row): number | null {
+  if (String(row.kind) !== "amount") return null;
+  if (row.consumption === null || row.consumption === undefined) return null;
+  const value = Number(row.consumption);
+  return Number.isFinite(value) ? value : null;
+}
+
+function trendFrom(rows: Row[]): { day: string; label: string; spanDays: number; value: number; span: boolean }[] {
+  const byDay = new Map<string, Row[]>();
+  for (const row of rows) {
+    const day = String(row.bill_day);
+    const list = byDay.get(day) ?? [];
+    list.push(row);
+    byDay.set(day, list);
+  }
+  const out: { day: string; label: string; spanDays: number; value: number; span: boolean }[] = [];
+  for (const [day, list] of [...byDay.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
+    const { counted } = partitionBillRows(list);
+    const buckets = new Map<string, { label: string; spanDays: number; value: number }>();
+    for (const row of counted) {
+      const amount = consumptionOf(row);
+      if (amount === null) continue;
+      const label = row.label ? String(row.label) : "";
+      const current = buckets.get(label) ?? { label, spanDays: Number(row.span_days ?? 1), value: 0 };
+      current.value += amount;
+      current.spanDays = Math.max(current.spanDays, Number(row.span_days ?? 1));
+      buckets.set(label, current);
+    }
+    for (const bucket of buckets.values()) {
+      out.push({ day, label: bucket.label, spanDays: bucket.spanDays, value: bucket.value, span: Boolean(bucket.label) });
+    }
+  }
+  return out;
+}
+
 
 /** 源 C 行：billDay 与次日两张 0 点快照的 USD 差（billing-pluggable §4/§9）。金额乘 QUOTA_PER_DOLLAR 入 consumption，沿用下游额度→美元格式化。 */
 async function supplierBillRows(channels: Row[], billDay: string): Promise<Row[]> {
@@ -510,9 +578,26 @@ export async function billingView(actor: SessionUser, options: BillingViewOption
   const unsyncedOnly = options.unsyncedOnly === true;
   const clock = shanghaiClock();
   const live = await dbGet("SELECT * FROM billing_runs WHERE baseline_day = ?", [clock.day]);
-  const showing = options.day
-    ? ((await dbAll("SELECT * FROM billing_runs WHERE bill_day = ? ORDER BY status = 'published' DESC LIMIT 1", [options.day])) as Row[])[0]
-    : ((await dbAll("SELECT * FROM billing_runs WHERE status = 'published' ORDER BY bill_day DESC LIMIT 1")) as Row[])[0];
+  const requested = options.day?.trim() || "";
+  const latest = ((await dbAll("SELECT * FROM billing_runs WHERE status = 'published' ORDER BY bill_day DESC LIMIT 1")) as Row[])[0];
+  let publication: BillPublication;
+  let showing: Row | undefined;
+  if (!requested) {
+    showing = latest;
+    publication = showing ? "latest" : "none";
+  } else {
+    const published = ((await dbAll(
+      "SELECT * FROM billing_runs WHERE bill_day = ? AND status = 'published' ORDER BY published_at DESC LIMIT 1",
+      [requested],
+    )) as Row[])[0];
+    if (!published) {
+      showing = undefined;
+      publication = "unpublished";
+    } else {
+      showing = published;
+      publication = latest && String(latest.bill_day) === requested ? "latest" : "published";
+    }
+  }
   const billDay = showing ? String(showing.bill_day) : null;
   const scopedToSupplier = actor.role !== "admin" || Boolean(options.supplierId);
   const scopeSupplier = scopedToSupplier ? "AND c.creator_user_id = ?" : "";
@@ -520,9 +605,11 @@ export async function billingView(actor: SessionUser, options: BillingViewOption
   const scope = scopeSupplier;
   const rows = billDay
     ? ((await dbAll(
-        `SELECT r.*, c.name, c.group_name, c.balance, c.used_quota, c.today_quota, c.type, c.origin, u.name AS creator_name
+        `SELECT r.*, c.name, c.group_name, c.balance, c.used_quota, c.today_quota, c.type, c.origin, c.upstream_id,
+                COALESCE(g.disabled, 0) AS gateway_disabled, g.base_url AS gateway_base, u.name AS creator_name
          FROM billing_rows r
          JOIN channels c ON c.id = r.channel_id
+         LEFT JOIN gateways g ON g.id = c.gateway_id
          LEFT JOIN users u ON u.id = c.creator_user_id
          WHERE r.bill_day = ? AND c.created_here = 1 ${scope}
          ORDER BY c.upstream_id`,
@@ -538,16 +625,32 @@ export async function billingView(actor: SessionUser, options: BillingViewOption
   }
   const supplierChannels = billDay
     ? ((await dbAll(
-        `SELECT c.id, c.name, c.group_name, c.type, u.name AS creator_name, c.imported_at FROM channels c JOIN gateways g ON g.id = c.gateway_id LEFT JOIN users u ON u.id = c.creator_user_id WHERE g.kind = 'newapi_supplier' AND c.created_here = 1 ${scope}`,
+        `SELECT c.id, c.name, c.group_name, c.type, u.name AS creator_name, c.imported_at, c.upstream_id, c.used_quota, c.balance,
+                COALESCE(g.disabled, 0) AS gateway_disabled, g.base_url AS gateway_base
+         FROM channels c JOIN gateways g ON g.id = c.gateway_id LEFT JOIN users u ON u.id = c.creator_user_id
+         WHERE g.kind = 'newapi_supplier' AND c.created_here = 1 ${scope}`,
         scopeParams,
       )) as Row[])
     : [];
-  const supplierRows = billDay ? await supplierBillRows(supplierChannels, billDay) : [];
+  const supplierMeta = new Map(supplierChannels.map((row) => [String(row.id), row]));
+  const supplierRows = billDay
+    ? (await supplierBillRows(supplierChannels, billDay)).map((row) => {
+        const source = supplierMeta.get(String(row.channel_id));
+        return source
+          ? { ...row, upstream_id: source.upstream_id, gateway_disabled: source.gateway_disabled, gateway_base: source.gateway_base }
+          : row;
+      })
+    : [];
   const merged = [...rows.filter((row) => !supplierIds.has(String(row.channel_id))), ...supplierRows];
-  const visible = unsyncedOnly ? merged.filter((row) => row.kind !== "amount") : merged;
-  const markers = billDay ? await rebindMarkers(merged.map((row) => String(row.channel_id)), billDay) : new Map();
-  const counted = merged.filter((row) => row.kind === "amount" && row.consumption !== null && row.consumption !== undefined);
-  const unsynced = merged.filter((row) => row.kind !== "amount");
+  const { counted: preferred, excluded } = partitionBillRows(merged);
+  const visible = unsyncedOnly ? preferred.filter((row) => row.kind !== "amount") : preferred;
+  const markers = billDay ? await rebindMarkers(visible.map((row) => String(row.channel_id)), billDay) : new Map();
+  const counted = preferred.filter((row) => consumptionOf(row) !== null);
+  const unsynced = preferred.filter((row) => row.kind !== "amount");
+  const disabledGateway = {
+    channels: excluded.length,
+    consumption: excluded.reduce((sum, row) => sum + (consumptionOf(row) ?? 0), 0),
+  };
   const by = (key: string) => {
     const map = new Map<string, number>();
     for (const row of counted) {
@@ -557,13 +660,14 @@ export async function billingView(actor: SessionUser, options: BillingViewOption
     return [...map.entries()].map(([name, value]) => ({ name, value })).sort((a, b) => b.value - a.value);
   };
   const trendRows = (await dbAll(
-    `SELECT r.bill_day, r.label, MAX(r.span_days) AS span_days, SUM(r.consumption) AS consumption
-     FROM billing_rows r JOIN channels c ON c.id = r.channel_id
-     WHERE r.kind = 'amount' AND c.created_here = 1 ${scope}
-     GROUP BY r.bill_day, r.label
-     ORDER BY r.bill_day ASC`,
+    `SELECT r.bill_day, r.label, r.span_days, r.consumption, r.kind, r.channel_id,
+            c.upstream_id, COALESCE(g.disabled, 0) AS gateway_disabled, g.base_url AS gateway_base
+     FROM billing_rows r
+     JOIN channels c ON c.id = r.channel_id
+     LEFT JOIN gateways g ON g.id = c.gateway_id
+     WHERE r.kind = 'amount' AND c.created_here = 1 ${scope}`,
     scopeParams,
-  )) as { bill_day: string; label: string | null; span_days: number; consumption: number }[];
+  )) as Row[];
   const counts = live
     ? await scopedCounts(String(live.baseline_day), actor)
     : { total: 0, ok: 0, failed: 0 };
@@ -581,9 +685,11 @@ export async function billingView(actor: SessionUser, options: BillingViewOption
         [String(live.baseline_day), ...scopeParams],
       )) as { channel_id: string }[]).map((row) => row.channel_id)
     : [];
+  const preferredIds = new Set(preferred.map((row) => String(row.channel_id)));
   return {
     copy: "schedule",
-    requestedDay: options.day ?? null,
+    requestedDay: requested || null,
+    publication,
     collecting: live?.status === "collecting",
     suppliers:
       actor.role === "admin"
@@ -599,11 +705,12 @@ export async function billingView(actor: SessionUser, options: BillingViewOption
     billDay,
     unsyncedCount: unsynced.length,
     incomplete: unsynced.length > 0,
+    disabledGateway,
     totalConsumption: counted.reduce((sum, row) => sum + Number(row.consumption ?? 0), 0),
-    totalTestQuota: merged.reduce((sum, row) => sum + Number(row.test_quota ?? 0), 0),
-    showTestLine: rows.some((row) => String(row.billing_mode ?? "") !== "snapshot"),
-    remainingBalance: merged.reduce((sum, row) => sum + (row.balance === null || row.balance === undefined ? 0 : Number(row.balance)), 0),
-    usedUsd: merged.reduce((sum, row) => sum + Number(row.used_quota ?? 0), 0) / QUOTA_PER_DOLLAR,
+    totalTestQuota: preferred.reduce((sum, row) => sum + Number(row.test_quota ?? 0), 0),
+    showTestLine: rows.some((row) => preferredIds.has(String(row.channel_id)) && String(row.billing_mode ?? "") !== "snapshot"),
+    remainingBalance: preferred.reduce((sum, row) => sum + (row.balance === null || row.balance === undefined ? 0 : Number(row.balance)), 0),
+    usedUsd: preferred.reduce((sum, row) => sum + Number(row.used_quota ?? 0), 0) / QUOTA_PER_DOLLAR,
     byType: (() => {
       const map = new Map<string, number>();
       for (const row of counted) {
@@ -615,13 +722,7 @@ export async function billingView(actor: SessionUser, options: BillingViewOption
     bySupplier: by("creator_name"),
     byChannel: by("name").slice(0, 8),
     byGroup: by("group_name"),
-    trend: trendRows.map((row) => ({
-      day: row.bill_day,
-      label: row.label ? String(row.label) : "",
-      spanDays: Number(row.span_days ?? 1),
-      value: Number(row.consumption ?? 0),
-      span: Boolean(row.label),
-    })),
+    trend: trendFrom(trendRows),
     rows: visible.map((row) => ({
       id: String(row.channel_id),
       name: String(row.name ?? ""),

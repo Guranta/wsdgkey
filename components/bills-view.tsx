@@ -1,55 +1,23 @@
 "use client";
 
-import { billFindingText, billLabelText, type Bill, type BillRow } from "@/components/billing-view";
+import { BillDayControl, BillPeriod, billFindingText, billLabelText, useBillingBill, type BillRow } from "@/components/billing-view";
 import { useConnections } from "@/components/providers";
-import { Alert, buttonClass, Card, PageHeader, useIsClient } from "@/components/ui";
+import { Alert, buttonClass, Card, PageHeader } from "@/components/ui";
 import { channelTypeOption } from "@/lib/channel-types";
 import { formatUsd } from "@/lib/format";
 import { formatShanghaiTime } from "@/lib/shanghai";
 import { useLocale, useTranslations } from "next-intl";
-import { Fragment, useEffect, useState } from "react";
+import { Fragment, useState } from "react";
 
 /** 每日账单：可选日期（默认最新一期），管理员可按供应商筛选，明细按渠道类型分段。 */
 export function BillsView() {
   const { user } = useConnections();
-  const hydrated = useIsClient();
   const t = useTranslations("billing");
-  const errors = useTranslations("errors");
   const locale = useLocale();
-  const [bill, setBill] = useState<Bill | null>(null);
-  const [day, setDay] = useState("");
   const [supplier, setSupplier] = useState("");
   const [unsynced, setUnsynced] = useState(false);
-  const [error, setError] = useState("");
+  const { hydrated, bill, error, pickerValue, chooseDay } = useBillingBill({ unsynced, supplier, intervalMs: 10_000 });
   const admin = user?.role === "admin";
-
-  useEffect(() => {
-    if (!hydrated) return;
-    let cancelled = false;
-    const params = new URLSearchParams();
-    if (unsynced) params.set("unsynced", "1");
-    if (day) params.set("day", day);
-    if (supplier) params.set("supplier", supplier);
-    const qs = params.toString();
-    const load = () => {
-      void fetch(`/api/billing${qs ? `?${qs}` : ""}`, { cache: "no-store" }).then(async (res) => {
-        if (!res.ok) {
-          if (!cancelled) setError(errors("billingLoadFailed"));
-          return;
-        }
-        if (!cancelled) {
-          setBill((await res.json()) as Bill);
-          setError("");
-        }
-      });
-    };
-    load();
-    const timer = window.setInterval(load, 10_000);
-    return () => {
-      cancelled = true;
-      window.clearInterval(timer);
-    };
-  }, [hydrated, unsynced, day, supplier, errors]);
 
   if (!hydrated || !bill) return <p className="text-sm text-muted">{t("loading")}</p>;
   const money = (value: number) => formatUsd(value, locale);
@@ -62,7 +30,7 @@ export function BillsView() {
     const amount = present.reduce((total, value) => total + value, 0);
     return missing ? `${money(amount)} · ${t("incomplete")}` : money(amount);
   };
-  const dayMissing = Boolean(bill.requestedDay) && !bill.billDay;
+  const unpublished = bill.publication === "unpublished" || (Boolean(bill.requestedDay) && !bill.billDay);
   const max = Math.max(1, ...bill.trend.map((item) => item.value));
   const typeGroups = new Map<string, BillRow[]>();
   for (const row of bill.rows) {
@@ -75,15 +43,12 @@ export function BillsView() {
     <div>
       <PageHeader title={t("billsTitle")} description={t("billsScope")} />
       {error ? <div className="mb-4"><Alert tone="danger">{error}</Alert></div> : null}
-      {dayMissing ? <div className="mb-4"><Alert tone="info">{t("noBillDay", { day: bill.requestedDay ?? "—" })}</Alert></div> : null}
+      {unpublished ? <div className="mb-4"><Alert tone="info">{t("unpublishedHint", { day: bill.requestedDay ?? "—" })}</Alert></div> : null}
       <div className="mb-4 flex flex-wrap items-center gap-3 text-sm">
-        <input
-          type="date"
-          className="h-9 rounded-control border-0 bg-input px-3 text-sm"
-          value={day}
-          aria-label={t("pickDay")}
-          onChange={(event) => {
-            setDay(event.target.value);
+        <BillDayControl
+          value={pickerValue}
+          onChange={(value) => {
+            chooseDay(value);
             setUnsynced(false);
           }}
         />
@@ -100,9 +65,9 @@ export function BillsView() {
             {bill.suppliers.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
           </select>
         ) : null}
-        <span className="text-secondary">{t("periodLine", { day: bill.billDay ?? "—" })}</span>
-        {bill.publishedAt ? <span className="rounded-full bg-ok-soft px-2.5 py-0.5 text-xs font-semibold text-ok">{t("publishedPill")}</span> : null}
-        {bill.collecting ? (
+        <BillPeriod bill={bill} />
+        {bill.publishedAt && !unpublished ? <span className="rounded-full bg-ok-soft px-2.5 py-0.5 text-xs font-semibold text-ok">{t("publishedPill")}</span> : null}
+        {!unpublished && bill.collecting ? (
           <span className="whitespace-nowrap rounded-full bg-warn-soft px-3 py-1 text-warn">
             {bill.progress.etaMinutes ? t("collectingEta", { ok: bill.progress.ok, total: bill.progress.total, minutes: bill.progress.etaMinutes }) : t("collecting", { ok: bill.progress.ok, total: bill.progress.total })}
           </span>
@@ -141,7 +106,7 @@ export function BillsView() {
               </tr>
             </thead>
             <tbody>
-              {bill.rows.length === 0 ? <tr><td colSpan={4} className="px-4 py-10 text-center text-muted">{dayMissing ? t("noBillDay", { day: bill.requestedDay ?? "—" }) : t("empty")}</td></tr> : [...typeGroups.entries()].map(([typeName, rows]) => {
+              {bill.rows.length === 0 && !bill.disabledGateway?.channels ? <tr><td colSpan={4} className="px-4 py-10 text-center text-muted">{unpublished ? t("unpublishedHint", { day: bill.requestedDay ?? "—" }) : t("empty")}</td></tr> : [...typeGroups.entries()].map(([typeName, rows]) => {
                 const first = rows[0];
                 const meta = first ? channelTypeOption(first.type) : null;
                 return (
@@ -192,6 +157,14 @@ export function BillsView() {
                     <td className="whitespace-nowrap px-4 py-3 tabular-nums">{summed(allRows, "cumulative")}</td>
                   </tr>
                 </>
+              ) : null}
+              {bill.disabledGateway?.channels ? (
+                <tr className="border-t border-line text-muted">
+                  <td className="px-4 py-3">{t("disabledGatewayExcluded")}</td>
+                  <td className="whitespace-nowrap px-4 py-3 tabular-nums">{money(bill.disabledGateway.consumption)}</td>
+                  <td className="px-4 py-3">—</td>
+                  <td className="px-4 py-3">—</td>
+                </tr>
               ) : null}
             </tbody>
           </table>

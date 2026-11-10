@@ -128,6 +128,7 @@ const SCHEMA = [
     created_here INTEGER NOT NULL DEFAULT 0,
     create_baseline REAL,
     upstream_missing INTEGER NOT NULL DEFAULT 0,
+    missing_confirmed_at INTEGER,
     UNIQUE (gateway_id, upstream_id)
   )`,
   `CREATE INDEX IF NOT EXISTS channels_gateway ON channels(gateway_id)`,
@@ -542,6 +543,7 @@ export async function ensureReady(): Promise<void> {
         ["missing_handled", "INTEGER NOT NULL DEFAULT 0"],
         ["origin", "TEXT NOT NULL DEFAULT 'created'"],
         ["imported_at", "INTEGER"],
+        ["missing_confirmed_at", "INTEGER"],
       ]);
       await addMissingColumns(db, "billing_rows", [["billing_mode", "TEXT NOT NULL DEFAULT ''"]]);
       await db.exec(

@@ -196,3 +196,10 @@
 - **原因**：翻页用 `page * 20 >= total` 判断结束。适配器在 total 缺失时用本页条数代替，于是空页、total 缺失或偏短都会被当成列表结束，`finishGatewayList` 把没见到的本应用渠道标成 `upstream_missing`。快照、基线拉取和导入用了同一判断。另外每 5 分钟的 tick 把所有网关页码打回 1，一页 20 条、15 秒一页时，上千条的网关走不完一圈，被误标的行再也见不到。`sellerRequest` 只在 401 时强制刷新并重试，403 直接抛出。
 - **处理**：只有上游给出明确的有限 total、本次扫描收集到的不重复 id 数量正好等于这个 total、且没有任何一页失败，才算列表结束，才允许把没见到的行标成不存在。空页、total 缺失或不一致、任何错误都中止本轮：不改 `upstream_missing`，不写 gateway-done。进行中的扫描不会被 5 分钟间隔打回第 1 页，多个网关轮流翻页。401 和 403 都强制刷新一次并重试一次，但每个网关 60 秒内只强制续期一次，并发请求共用同一次续期；冷却期内再次 401/403 不再登录，只记拉取失败，下一轮再试。仍失败只记拉取失败，渠道保留上次状态并显示「状态未更新」。已停用网关的行显示「已停用网关 · 不同步」，不计入拉取失败。某日没有快照显示「缺数据」，账单合计标「不完整」。管理员可 `POST /api/admin/supplier-snapshots`，只补当天还没有快照的渠道，不覆盖已有行，也不写过去的日期。
 - **位置**：`lib/list-sweep.ts`；`lib/channel-service.ts` 的 `syncGatewayPage`、`finishGatewayList`；`lib/jobs.ts`；`lib/seller-auth.ts` 的 `sellerRequest`；`lib/supplier-billing.ts`；`lib/billing-service.ts` 的 `pullSellerBaseline`；`app/api/admin/supplier-snapshots/route.ts`。
+
+## 28. 账单合计要去重，停用网关不进合计
+
+- **症状**：同一条上游渠道挂在两个网关上时，总消耗、按分组、按类型、按供应商和已用美元比网关上的数大一倍。已经停用的网关仍被加进这些合计，钱像是消失了，因为明细里又没有单独交代。
+- **原因**：本地可以给同一个上游渠道（相同 `upstream_id`，且网关站点地址归一化后相同）各存一行。视图如果按行相加就会算两次。停用只是网关不再同步，历史账单行还在。
+- **处理**：只改展示和汇总，不改已经发布的 `billing_rows` 和快照。同一上游渠道在合计里只留一行，优先用仍启用的网关那一行。停用网关的金额从上述合计拿掉，账单上单独放一行灰色「已停用网关 · 不计入合计」。总览的异常计数同样只算启用中的网关；`upstream_missing = 1` 只算「网关上找不到」，不重复算进拉取失败、降频或未同步。停用网关另有一行「已停用网关 · 不同步」。
+- **位置**：`lib/billing-service.ts` 的 `billingView`；`lib/channel-service.ts` 的 `loadStats`。
