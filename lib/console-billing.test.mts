@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
 import http from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -28,6 +28,12 @@ test("a picked bill day is sent, and the picker shows the loaded day", () => {
   assert.equal(disabledGatewayAmountText({ channels: 2, consumption: 40, complete: false }, money, "缺数据", "不完整"), "$40 · 不完整");
   assert.equal(disabledGatewayAmountText({ channels: 2, consumption: 30, complete: true }, money, "缺数据", "不完整"), "$30");
   assert.notEqual(disabledGatewayAmountText({ channels: 1, consumption: null, complete: false }, () => "$0.00", "缺数据", "不完整"), "$0.00");
+  const zh = JSON.parse(readFileSync(new URL("../messages/zh-CN.json", import.meta.url), "utf8")) as { channels: { confirmedAt: string; pendingConfirm: string } };
+  const en = JSON.parse(readFileSync(new URL("../messages/en.json", import.meta.url), "utf8")) as { channels: { confirmedAt: string; pendingConfirm: string } };
+  assert.equal(zh.channels.confirmedAt, "最近确认于 {when}");
+  assert.equal(zh.channels.pendingConfirm, "待确认");
+  assert.equal(en.channels.confirmedAt, "Last confirmed {when}");
+  assert.equal(en.channels.pendingConfirm, "Pending confirmation");
 });
 
 async function freshDb() {
@@ -75,11 +81,39 @@ test("overview counts do not let a missing row count as pull, throttle, or unsyn
   assert.equal(listed.stats.upstreamMissing, 2);
   assert.equal(listed.stats.autoDisabled, 1);
   assert.equal(listed.stats.pullFailed, 1);
-  assert.equal(listed.stats.autoDisabled + listed.stats.pullFailed + listed.stats.upstreamMissing, 4);
+  assert.equal(listed.stats.anomaly, listed.stats.autoDisabled + listed.stats.pullFailed + listed.stats.upstreamMissing);
   assert.equal(listed.stats.queue.throttled, 1);
   assert.equal(listed.stats.queue.unsynced, 0);
   assert.equal(listed.stats.pausedGateways, 1);
-  assert.equal(listed.stats.anomaly, 3);
+});
+
+test("a channel that is missing and auto-disabled counts only as missing", async () => {
+  const { dbRun } = await freshDb();
+  const { authenticate } = await import("./users.ts");
+  const { queryChannels } = await import("./channel-service.ts");
+  const admin = await authenticate("admin", "admin-pass-123");
+  if (typeof admin !== "object") throw new Error("admin");
+  const now = Date.now();
+  await dbRun(
+    `INSERT INTO gateways (id, name, base_url, token_cipher, admin_user_id, demo, created_at, updated_at, disabled)
+     VALUES ('gw-on', 'on', 'https://on.example', '', '1', 0, ?, ?, 0),
+            ('gw-off', 'off', 'https://off.example', '', '1', 0, ?, ?, 1)`,
+    [now, now, now, now],
+  );
+  await dbRun(
+    `INSERT INTO channels (
+      id, gateway_id, upstream_id, creator_user_id, name, type, group_name, status, created_at, updated_at,
+      created_here, upstream_missing, sync_status
+    ) VALUES ('both', 'gw-on', 1, ?, 'both', 1, 'pool', 3, ?, ?, 1, 1, 'failed'),
+             ('paused', 'gw-off', 2, ?, 'paused', 1, 'pool', 3, ?, ?, 1, 1, 'failed')`,
+    [admin.id, now, now, admin.id, now, now],
+  );
+  const listed = await queryChannels(admin, new URLSearchParams());
+  assert.equal(listed.stats.upstreamMissing, 1);
+  assert.equal(listed.stats.autoDisabled, 0);
+  assert.equal(listed.stats.pullFailed, 0);
+  assert.equal(listed.stats.anomaly, 1);
+  assert.equal(listed.stats.pausedGateways, 1);
 });
 
 test("an unpublished day does not fall back, and the default view is the latest published day", async () => {

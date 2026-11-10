@@ -232,7 +232,6 @@ async function loadStats(scopeWhere: string, scopeParams: unknown[], day: string
   const bounds = days.map((item) => shanghaiMidnight(addDays(item, 1)));
   const createdBefore = (end: number, match: (row: ChannelRow) => boolean) =>
     rows.reduce((count, row) => (Number(row.created_at ?? 0) < end && match(row) ? count + 1 : count), 0);
-  const liveGateway = (row: ChannelRow) => Number(row.gateway_disabled) !== 1;
   const enabledRow = (row: ChannelRow) => Number(row.status) === 1 && Number(row.upstream_missing) !== 1;
   const disabledRow = (row: ChannelRow) => Number(row.status) !== 1;
   const todayOf = (row: ChannelRow) => {
@@ -274,15 +273,18 @@ async function loadStats(scopeWhere: string, scopeParams: unknown[], day: string
     [Date.now(), ...scopeParams],
   )) as ChannelRow | undefined;
   const queue = upstreamQueue.snapshot();
+  const autoDisabled = Number(pull?.auto_n ?? 0);
+  const pullFailed = Number(pull?.pull_n ?? 0);
+  const upstreamMissing = Number(pull?.missing_n ?? 0);
   return {
     total: rows.length,
     enabled: rows.reduce((count, row) => count + (enabledRow(row) ? 1 : 0), 0),
     disabled: rows.reduce((count, row) => count + (disabledRow(row) ? 1 : 0), 0),
     running: rows.reduce((count, row) => count + (enabledRow(row) ? 1 : 0), 0),
-    anomaly: rows.reduce((count, row) => count + (liveGateway(row) && (Number(row.status) === 3 || Number(row.upstream_missing) === 1) ? 1 : 0), 0),
-    autoDisabled: Number(pull?.auto_n ?? 0),
-    pullFailed: Number(pull?.pull_n ?? 0),
-    upstreamMissing: Number(pull?.missing_n ?? 0),
+    anomaly: autoDisabled + pullFailed + upstreamMissing,
+    autoDisabled,
+    pullFailed,
+    upstreamMissing,
     pausedGateways: Number(pull?.paused_n ?? 0),
     todayQuota,
     yesterdayQuota: Number(yesterdayRow?.n ?? 0),

@@ -566,7 +566,9 @@ export function ChannelsView() {
                           <div className="mt-1 flex items-center gap-1.5 text-xs text-muted">
                             <span className={`h-1.5 w-1.5 rounded-full ${item.upstreamMissing ? "bg-warn" : item.syncStatus === "ok" ? "bg-ok" : "bg-warn"}`} />
                             {item.upstreamMissing
-                              ? t("confirmedAt", { when: item.missingConfirmedAt ? formatShanghaiTime(item.missingConfirmedAt, locale) : "—" })
+                              ? item.missingConfirmedAt
+                                ? t("confirmedAt", { when: formatShanghaiTime(item.missingConfirmedAt, locale) })
+                                : t("pendingConfirm")
                               : item.lastSyncAt
                                 ? t("updatedAgo", { when: formatTimestamp(item.lastSyncAt, locale) })
                                 : t("notSynced")}
